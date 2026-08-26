@@ -1,0 +1,19 @@
+# Android / Gradle 构建产物
+MomentumRotation/.gradle/
+MomentumRotation/.kotlin/
+MomentumRotation/app/build/
+MomentumRotation/build/
+MomentumRotation/local.properties
+MomentumRotation/.idea/
+MomentumRotation/*.iml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 系统
+.DS_Store
+*.log

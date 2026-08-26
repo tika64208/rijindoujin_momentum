@@ -1,0 +1,345 @@
+package com.example.momentum.ui.screen
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.momentum.data.DataOrigin
+import com.example.momentum.model.Recommendation
+import com.example.momentum.model.Tier
+import com.example.momentum.ui.theme.*
+import kotlin.math.abs
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MomentumScreen(
+    viewModel: MomentumViewModel = viewModel(),
+    onOpenSettings: () -> Unit = {}
+) {
+    val state by viewModel.state.collectAsState()
+
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = {
+                    Text("动量轮动选股助手", fontWeight = FontWeight.Bold)
+                },
+                actions = {
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(
+                            Icons.Filled.Settings,
+                            contentDescription = "设置",
+                            tint = Color.White
+                        )
+                    }
+                },
+                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                    containerColor = Blue700,
+                    titleContentColor = Color.White
+                )
+            )
+        },
+        containerColor = SurfaceBg
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp)
+        ) {
+            // 输入区
+            AddStockBar(
+                code = state.inputCode,
+                name = state.inputName,
+                onCodeChange = { viewModel.updateInput(it, state.inputName) },
+                onNameChange = { viewModel.updateInput(state.inputCode, it) },
+                onAdd = { viewModel.addStock() }
+            )
+
+            state.error?.let { err ->
+                Text(
+                    text = "⚠ $err",
+                    color = Red600,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(vertical = 4.dp)
+                )
+            }
+
+            // 运行按钮
+            Button(
+                onClick = { viewModel.runRanking() },
+                enabled = !state.loading,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Blue700)
+            ) {
+                if (state.loading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        color = Color.White,
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("计算中…")
+                } else {
+                    Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("轮动计算")
+                }
+            }
+
+            // 分析按钮
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = { viewModel.runTrendAnalysis() },
+                    enabled = !state.analyzing,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Amber600)
+                ) {
+                    if (state.analyzing) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("动量预警", fontSize = 13.sp)
+                    }
+                }
+                OutlinedButton(
+                    onClick = { viewModel.runBacktest() },
+                    enabled = !state.analyzing,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Green600)
+                ) {
+                    if (state.analyzing) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("回测对比", fontSize = 13.sp)
+                    }
+                }
+            }
+
+            // 主内容
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                contentPadding = PaddingValues(bottom = 24.dp)
+            ) {
+                item { WatchlistSection(state.watchlist, viewModel::removeStock) }
+
+                if (state.recommendations.isNotEmpty()) {
+                    item { DataOriginBadge(state.dataOrigin) }
+                    item { RecommendationSection(state.recommendations) }
+                }
+
+                if (state.trends.isNotEmpty()) {
+                    item { MomentumTrendPanel(state.trends) }
+                }
+
+                state.backtest?.let { bt ->
+                    item { BacktestPanel(bt) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddStockBar(
+    code: String,
+    name: String,
+    onCodeChange: (String) -> Unit,
+    onNameChange: (String) -> Unit,
+    onAdd: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        OutlinedTextField(
+            value = code,
+            onValueChange = onCodeChange,
+            modifier = Modifier.weight(1.2f),
+            label = { Text("代码", fontSize = 13.sp) },
+            singleLine = true,
+            shape = RoundedCornerShape(10.dp)
+        )
+        OutlinedTextField(
+            value = name,
+            onValueChange = onNameChange,
+            modifier = Modifier.weight(1.0f),
+            label = { Text("名称(选填)", fontSize = 13.sp) },
+            singleLine = true,
+            shape = RoundedCornerShape(10.dp)
+        )
+        FilledIconButton(
+            onClick = onAdd,
+            modifier = Modifier.size(48.dp),
+            colors = IconButtonDefaults.filledIconButtonColors(containerColor = Green600)
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = "添加", tint = Color.White)
+        }
+    }
+}
+
+@Composable
+private fun DataOriginBadge(origin: DataOrigin?) {
+    if (origin == null) return
+    val (text, color, bg) = when (origin) {
+        DataOrigin.FRESH -> Triple("已联网更新", Green600, GreenContainer)
+        DataOrigin.CACHE -> Triple("本地缓存(当日已更新)", Blue700, Color(0xFFDBEAFE))
+        DataOrigin.OFFLINE -> Triple("离线模式(使用本地缓存数据)", Amber600, AmberContainer)
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(bg, RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Text(text, color = color, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun WatchlistSection(
+    watchlist: List<com.example.momentum.model.Stock>,
+    onRemove: (String) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White)
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text(
+                "自选股池 (${watchlist.size})",
+                fontWeight = FontWeight.SemiBold,
+                color = Blue700,
+                fontSize = 15.sp
+            )
+            Spacer(Modifier.height(8.dp))
+            if (watchlist.isEmpty()) {
+                Text("暂无自选股，请在上面添加", fontSize = 13.sp, color = Color.Gray)
+            }
+            watchlist.forEach { stock ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        stock.name,
+                        fontSize = 14.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(stock.code, fontSize = 12.sp, color = Color.Gray)
+                    IconButton(onClick = { onRemove(stock.code) }, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = "删除",
+                            tint = Color.Gray,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecommendationSection(recs: List<Recommendation>) {
+    val groups = recs.groupBy { it.tier }
+    val order = listOf(Tier.BUY, Tier.HOLD, Tier.SELL)
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        order.forEach { tier ->
+            val list = groups[tier] ?: return@forEach
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = when (tier) {
+                        Tier.BUY -> GreenContainer
+                        Tier.HOLD -> AmberContainer
+                        Tier.SELL -> RedContainer
+                    }
+                )
+            ) {
+                Column(Modifier.padding(12.dp)) {
+                    val (label, color) = when (tier) {
+                        Tier.BUY -> "🟢 买入/加仓" to Green600
+                        Tier.HOLD -> "🟡 持有/观察" to Amber600
+                        Tier.SELL -> "🔴 卖出/减仓" to Red600
+                    }
+                    Text(
+                        "$label (${list.size})",
+                        fontWeight = FontWeight.Bold,
+                        color = color,
+                        fontSize = 15.sp
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    list.sortedByDescending { it.score }.forEach { r ->
+                        RecommendationRow(r)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecommendationRow(r: Recommendation) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "${r.rank}.",
+            fontSize = 13.sp,
+            color = Color.Gray,
+            modifier = Modifier.width(28.dp)
+        )
+        Column(Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(r.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(6.dp))
+                Text(r.code, fontSize = 11.sp, color = Color.Gray)
+            }
+            Text(
+                "动量分 ${formatScore(r.score)}  ·  12月收益 ${formatPct(r.r12m)}",
+                fontSize = 12.sp,
+                color = Color.Gray
+            )
+        }
+        Text(
+            formatPct(r.r12m),
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            color = if (r.r12m >= 0) Green600 else Red600
+        )
+    }
+}
+
+private fun formatScore(v: Double): String =
+    if (v.isNaN()) "—" else String.format("%.2f", v)
+
+private fun formatPct(v: Double): String =
+    if (v.isNaN()) "—" else String.format("%+.1f%%", v * 100)
