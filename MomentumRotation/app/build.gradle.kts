@@ -17,6 +17,17 @@ android {
         versionName = "1.0"
     }
 
+    signingConfigs {
+        // release 复用 debug keystore, 使 release APK 可直接安装/分发
+        // (非商店上架正式签名, 如需上架请替换为正式 keystore)
+        create("release") {
+            storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -24,6 +35,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
