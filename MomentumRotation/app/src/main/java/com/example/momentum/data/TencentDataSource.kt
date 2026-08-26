@@ -58,6 +58,80 @@ object TencentDataSource {
         }
     }
 
+    /**
+     * 搜索结果条目。
+     */
+    data class SearchResult(
+        val symbol: String,   // 带前缀 sh/sz/bj
+        val code: String,     // 6位代码
+        val name: String
+    )
+
+    /**
+     * 按关键词搜索 A股股票(支持中文名称/拼音/代码)。
+     *
+     * 接口: smartbox.gtimg.cn/s3/?v=2&q=<kw>&t=gp
+     * 返回格式: v_hint="市场~代码~名称~拼音~GP-A^市场~代码~..."
+     */
+    fun searchStocks(keyword: String): List<SearchResult> {
+        if (keyword.isBlank()) return emptyList()
+        return try {
+            val encoded = java.net.URLEncoder.encode(keyword, "UTF-8")
+            val text = httpGetText("https://smartbox.gtimg.cn/s3/?v=2&q=$encoded&t=gp")
+            // 剥离 v_hint="..." 包装
+            val body = text.substringAfter("v_hint=\"").substringBeforeLast("\"")
+            if (body.isEmpty()) return emptyList()
+
+            val results = ArrayList<SearchResult>()
+            for (item in body.split("^")) {
+                val parts = item.split("~")
+                if (parts.size < 5) continue
+                val market = parts[0].trim()
+                val code = parts[1].trim()
+                val name = unescapeUnicode(parts[2].trim())
+                val type = parts[4].trim()
+                // 只保留 A股(GP-A)
+                if (type == "GP-A" && code.length == 6 && code.all { it.isDigit() }) {
+                    results.add(
+                        SearchResult(
+                            symbol = "$market$code",
+                            code = code,
+                            name = name
+                        )
+                    )
+                }
+            }
+            // 去重(按 code)
+            results.distinctBy { it.code }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * 把 \uXXXX 转义序列解码为真实 Unicode 字符。
+     * 例: "\u9886\u5148\u80a1\u4efd" -> "领先股份"
+     */
+    private fun unescapeUnicode(input: String): String {
+        if (!input.contains("\\u")) return input
+        val sb = StringBuilder(input.length)
+        var i = 0
+        while (i < input.length) {
+            if (input[i] == '\\' && i + 1 < input.length && input[i + 1] == 'u' && i + 5 < input.length) {
+                val hex = input.substring(i + 2, i + 6)
+                val code = hex.toIntOrNull(16)
+                if (code != null) {
+                    sb.append(code.toChar())
+                    i += 6
+                    continue
+                }
+            }
+            sb.append(input[i])
+            i++
+        }
+        return sb.toString()
+    }
+
     private fun httpGetJson(url: String, referer: String? = null): JSONObject {
         val text = httpGetText(url, referer)
         return JSONObject(text)

@@ -145,4 +145,10 @@ class StockRepository(
             }.filter { it.second.isNotEmpty() }
             BacktestEngine.run(pairs)
         }
+
+    /** 按关键词搜索 A股股票(中文名/拼音/代码)。 */
+    suspend fun searchStocks(keyword: String): List<TencentDataSource.SearchResult> =
+        withContext(Dispatchers.IO) {
+            dataSource.searchStocks(keyword)
+        }
 }

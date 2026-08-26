@@ -1,6 +1,7 @@
 package com.example.momentum.ui.screen
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -66,13 +67,14 @@ fun MomentumScreen(
                 .padding(padding)
                 .padding(horizontal = 16.dp)
         ) {
-            // 输入区
+            // 输入区(支持名称/代码搜索)
             AddStockBar(
-                code = state.inputCode,
-                name = state.inputName,
-                onCodeChange = { viewModel.updateInput(it, state.inputName) },
-                onNameChange = { viewModel.updateInput(state.inputCode, it) },
-                onAdd = { viewModel.addStock() }
+                keyword = state.inputCode,
+                searching = state.searching,
+                searchResults = state.searchResults,
+                onKeywordChange = { viewModel.updateInput(it) },
+                onAdd = { viewModel.addStock() },
+                onPickResult = { viewModel.addStockFromSearch(it) }
             )
 
             state.error?.let { err ->
@@ -161,39 +163,71 @@ fun MomentumScreen(
 
 @Composable
 private fun AddStockBar(
-    code: String,
-    name: String,
-    onCodeChange: (String) -> Unit,
-    onNameChange: (String) -> Unit,
-    onAdd: () -> Unit
+    keyword: String,
+    searching: Boolean,
+    searchResults: List<com.example.momentum.data.TencentDataSource.SearchResult>,
+    onKeywordChange: (String) -> Unit,
+    onAdd: () -> Unit,
+    onPickResult: (com.example.momentum.data.TencentDataSource.SearchResult) -> Unit
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        OutlinedTextField(
-            value = code,
-            onValueChange = onCodeChange,
-            modifier = Modifier.weight(1.2f),
-            label = { Text("代码", fontSize = 13.sp) },
-            singleLine = true,
-            shape = RoundedCornerShape(10.dp)
-        )
-        OutlinedTextField(
-            value = name,
-            onValueChange = onNameChange,
-            modifier = Modifier.weight(1.0f),
-            label = { Text("名称(选填)", fontSize = 13.sp) },
-            singleLine = true,
-            shape = RoundedCornerShape(10.dp)
-        )
-        FilledIconButton(
-            onClick = onAdd,
-            modifier = Modifier.size(48.dp),
-            colors = IconButtonDefaults.filledIconButtonColors(containerColor = Green600)
+    Column(Modifier.fillMaxWidth().padding(top = 12.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(Icons.Filled.Add, contentDescription = "添加", tint = Color.White)
+            OutlinedTextField(
+                value = keyword,
+                onValueChange = onKeywordChange,
+                modifier = Modifier.weight(1f),
+                label = { Text("搜索股票名称/代码", fontSize = 13.sp) },
+                trailingIcon = {
+                    if (searching) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp
+                        )
+                    }
+                },
+                singleLine = true,
+                shape = RoundedCornerShape(10.dp)
+            )
+            FilledIconButton(
+                onClick = onAdd,
+                modifier = Modifier.size(48.dp),
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = Green600)
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = "添加(按代码)", tint = Color.White)
+            }
+        }
+
+        // 搜索候选下拉
+        if (searchResults.isNotEmpty()) {
+            Card(
+                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            ) {
+                Column(Modifier.padding(vertical = 4.dp)) {
+                    searchResults.take(8).forEach { r ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onPickResult(r) }
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                r.name,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(r.code, fontSize = 12.sp, color = Color.Gray)
+                        }
+                    }
+                }
+            }
         }
     }
 }
