@@ -10,9 +10,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -27,6 +31,17 @@ fun SettingsScreen(
     viewModel: MomentumViewModel
 ) {
     val settings by viewModel.settings.collectAsState()
+    val context = LocalContext.current
+    var monitorEnabled by remember {
+        mutableStateOf(
+            context.getSharedPreferences("monitor", android.content.Context.MODE_PRIVATE)
+                .getBoolean("monitor_enabled", false)
+        )
+    }
+    val onMonitorToggle: (Boolean) -> Unit = { enabled ->
+        monitorEnabled = enabled
+        viewModel.setMonitorEnabled(enabled)
+    }
 
     Scaffold(
         topBar = {
@@ -100,6 +115,31 @@ fun SettingsScreen(
                     Switch(
                         checked = settings.reminderOn,
                         onCheckedChange = { viewModel.saveReminderOn(it) },
+                        colors = SwitchDefaults.colors(checkedTrackColor = Green600)
+                    )
+                }
+            }
+
+            // 实时监控开关
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("实时行情监控", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                        Text(
+                            "交易时段检测涨速突变/涨跌停/放量并通知",
+                            fontSize = 12.sp, color = Color.Gray
+                        )
+                    }
+                    Switch(
+                        checked = monitorEnabled,
+                        onCheckedChange = onMonitorToggle,
                         colors = SwitchDefaults.colors(checkedTrackColor = Green600)
                     )
                 }

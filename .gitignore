@@ -17,3 +17,7 @@ venv/
 # 系统
 .DS_Store
 *.log
+
+# DSH 工作区文件(不应提交到项目仓库)
+.dsh/
+.dsh-filess/

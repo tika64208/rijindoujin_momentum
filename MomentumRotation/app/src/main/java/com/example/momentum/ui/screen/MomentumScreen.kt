@@ -34,7 +34,8 @@ import kotlin.math.abs
 @Composable
 fun MomentumScreen(
     viewModel: MomentumViewModel = viewModel(),
-    onOpenSettings: () -> Unit = {}
+    onOpenSettings: () -> Unit = {},
+    onStockClick: (code: String, name: String) -> Unit = { _, _ -> }
 ) {
     val state by viewModel.state.collectAsState()
 
@@ -134,6 +135,18 @@ fun MomentumScreen(
                         Text("回测对比", fontSize = 13.sp)
                     }
                 }
+                OutlinedButton(
+                    onClick = { viewModel.runEquityCurve() },
+                    enabled = !state.analyzing,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Blue700)
+                ) {
+                    if (state.analyzing) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("收益曲线", fontSize = 13.sp)
+                    }
+                }
             }
 
             // 主内容
@@ -142,7 +155,7 @@ fun MomentumScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
-                item { WatchlistSection(state.watchlist, viewModel::removeStock) }
+                item { WatchlistSection(state.watchlist, viewModel::removeStock, onStockClick) }
 
                 if (state.recommendations.isNotEmpty()) {
                     item { DataOriginBadge(state.dataOrigin) }
@@ -155,6 +168,18 @@ fun MomentumScreen(
 
                 state.backtest?.let { bt ->
                     item { BacktestPanel(bt) }
+                }
+
+                state.equityCurve?.let { curve ->
+                    item {
+                        EquityCurvePanel(
+                            curveSet = curve,
+                            onSegmentChange = { start, end ->
+                                viewModel.updateCurveSegment(start, end)
+                            },
+                            segmentResults = state.curveSegment
+                        )
+                    }
                 }
             }
         }
@@ -255,7 +280,8 @@ private fun DataOriginBadge(origin: DataOrigin?) {
 @Composable
 private fun WatchlistSection(
     watchlist: List<com.example.momentum.model.Stock>,
-    onRemove: (String) -> Unit
+    onRemove: (String) -> Unit,
+    onClick: (code: String, name: String) -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -264,7 +290,7 @@ private fun WatchlistSection(
     ) {
         Column(Modifier.padding(12.dp)) {
             Text(
-                "自选股池 (${watchlist.size})",
+                "自选股池 (${watchlist.size}) (点击查看分时图)",
                 fontWeight = FontWeight.SemiBold,
                 color = Blue700,
                 fontSize = 15.sp
@@ -275,7 +301,10 @@ private fun WatchlistSection(
             }
             watchlist.forEach { stock ->
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onClick(stock.code, stock.name) }
+                        .padding(vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(

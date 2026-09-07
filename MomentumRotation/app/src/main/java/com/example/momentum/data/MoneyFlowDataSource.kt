@@ -1,0 +1,87 @@
+package com.example.momentum.data
+
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.net.HttpURLConnection
+import java.net.URL
+
+/**
+ * 东方财富主力资金流向数据源(个股历史)。
+ *
+ * 接口: push2his.eastmoney.com/api/qt/stock/fflow/daykline/get
+ * 返回 klines: 每行 "日期,主力净流入,小单净流入,..."
+ * 注意: 该接口需限流, 不能高频连续请求。
+ */
+object MoneyFlowDataSource {
+
+    private const val UA =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+
+    /**
+     * 单日资金流向记录。
+     */
+    data class FlowPoint(
+        val date: String,        // yyyy-MM-dd
+        val mainNet: Double,     // 主力净流入(元)
+        val smallNet: Double,    // 小单净流入(元)
+        val mainRatio: Double    // 主力净流入占比(%)
+    )
+
+    /**
+     * 查询个股近 N 日的主力资金流向。
+     * @param code 6位股票代码
+     * @param days 回看天数(<=60)
+     */
+    fun fetchFlow(code: String, days: Int = 30): List<FlowPoint> {
+        // secid 格式: 0.代码(深) / 1.代码(沪)
+        val market = if (code.startsWith("6") || code.startsWith("5")) "1" else "0"
+        val secid = "$market.$code"
+        val url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get" +
+            "?secid=$secid&fields1=f1,f2,f3,f7" +
+            "&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65" +
+            "&klt=101&lmt=$days"
+
+        return try {
+            val text = httpGet(url)
+            val json = JSONObject(text)
+            val data = json.optJSONObject("data") ?: return emptyList()
+            val klines = data.optJSONArray("klines") ?: return emptyList()
+            val result = ArrayList<FlowPoint>(klines.length())
+            for (i in 0 until klines.length()) {
+                val parts = klines.getString(i).split(",")
+                if (parts.size >= 7) {
+                    result.add(
+                        FlowPoint(
+                            date = parts[0],
+                            mainNet = parts[1].toDoubleOrNull() ?: 0.0,
+                            smallNet = parts[2].toDoubleOrNull() ?: 0.0,
+                            mainRatio = parts[6].toDoubleOrNull() ?: 0.0  // f57 主力净流入占比
+                        )
+                    )
+                }
+            }
+            result
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun httpGet(urlStr: String): String {
+        val conn = URL(urlStr).openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 10_000
+            conn.setRequestProperty("User-Agent", UA)
+            conn.setRequestProperty("Referer", "https://data.eastmoney.com/")
+            conn.setRequestProperty("Accept", "*/*")
+            val code = conn.responseCode
+            if (code != 200) throw RuntimeException("HTTP $code")
+            val reader = BufferedReader(conn.inputStream.reader(Charsets.UTF_8))
+            return reader.use { it.readText() }
+        } finally {
+            conn.disconnect()
+        }
+    }
+}

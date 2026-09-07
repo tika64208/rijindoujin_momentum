@@ -4,6 +4,7 @@ import com.example.momentum.data.db.AppDatabase
 import com.example.momentum.data.db.CacheMetaEntity
 import com.example.momentum.data.db.DailyBarEntity
 import com.example.momentum.engine.BacktestEngine
+import com.example.momentum.engine.EquityCurveEngine
 import com.example.momentum.engine.MomentumEngine
 import com.example.momentum.engine.MomentumTrend
 import com.example.momentum.engine.MomentumTrendEngine
@@ -70,8 +71,13 @@ class StockRepository(
                                 barCount = entities.size
                             )
                         )
-                        val liveName = dataSource.fetchStockName(symbol).ifBlank { name }
-                        val m = MomentumEngine.computeStockMomentum(stock.code, liveName, fetched, config)
+                        // 名称: 优先用自选股池里的中文名; 仅当 name 是纯代码时才查接口
+                        val finalName = if (name.isEmpty() || name.all { it.isDigit() }) {
+                            dataSource.fetchStockName(symbol).ifBlank { name.ifBlank { stock.code } }
+                        } else {
+                            name
+                        }
+                        val m = MomentumEngine.computeStockMomentum(stock.code, finalName, fetched, config)
                         return@withContext m to DataOrigin.FRESH
                     }
                 } catch (e: Exception) {
@@ -150,5 +156,14 @@ class StockRepository(
     suspend fun searchStocks(keyword: String): List<TencentDataSource.SearchResult> =
         withContext(Dispatchers.IO) {
             dataSource.searchStocks(keyword)
+        }
+
+    /** 收益曲线(动量 vs 均仓 vs 个股, 100万本金)。 */
+    suspend fun buildEquityCurve(stocks: List<Stock>): EquityCurveEngine.CurveSet =
+        withContext(Dispatchers.IO) {
+            val pairs = stocks.map { stock ->
+                stock.code to loadBars(stock)
+            }.filter { it.second.isNotEmpty() }
+            EquityCurveEngine.build(pairs)
         }
 }

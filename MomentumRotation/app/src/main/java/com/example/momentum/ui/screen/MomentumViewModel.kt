@@ -11,10 +11,12 @@ import com.example.momentum.data.StockRepository
 import com.example.momentum.data.TencentDataSource
 import com.example.momentum.data.db.AppDatabase
 import com.example.momentum.engine.BacktestEngine
+import com.example.momentum.engine.EquityCurveEngine
 import com.example.momentum.engine.MomentumEngine
 import com.example.momentum.engine.MomentumTrend
 import com.example.momentum.model.Recommendation
 import com.example.momentum.model.Stock
+import com.example.momentum.notify.MonitorWorker
 import com.example.momentum.notify.RebalanceReminderWorker
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -36,7 +38,9 @@ data class UiState(
     val backtest: BacktestEngine.BacktestResult? = null,
     val analyzing: Boolean = false,
     val searchResults: List<TencentDataSource.SearchResult> = emptyList(),
-    val searching: Boolean = false
+    val searching: Boolean = false,
+    val equityCurve: EquityCurveEngine.CurveSet? = null,
+    val curveSegment: List<EquityCurveEngine.SegmentResult> = emptyList()
 ) {
     companion object {
         val SAMPLE_WATCHLIST = listOf(
@@ -117,6 +121,7 @@ class MomentumViewModel(
                 error = null
             )
         }
+        syncWatchlistToPrefs()
     }
 
     fun addStock() {
@@ -140,10 +145,27 @@ class MomentumViewModel(
                 error = null
             )
         }
+        syncWatchlistToPrefs()
     }
 
     fun removeStock(code: String) {
         _state.update { it.copy(watchlist = it.watchlist.filter { s -> s.code != code }) }
+        syncWatchlistToPrefs()
+    }
+
+    /** 把自选股代码同步到 SharedPreferences, 供后台监控 Worker 读取。 */
+    private fun syncWatchlistToPrefs() {
+        val codes = _state.value.watchlist.joinToString(",") { it.code }
+        app.getSharedPreferences("monitor", android.content.Context.MODE_PRIVATE)
+            .edit().putString("watch_codes", codes).apply()
+    }
+
+    /** 开启/关闭实时监控。 */
+    fun setMonitorEnabled(enabled: Boolean) {
+        app.getSharedPreferences("monitor", android.content.Context.MODE_PRIVATE)
+            .edit().putBoolean("monitor_enabled", enabled).apply()
+        syncWatchlistToPrefs()
+        MonitorWorker.schedule(app, enabled)
     }
 
     fun runRanking() {
@@ -207,6 +229,37 @@ class MomentumViewModel(
                 _state.update { it.copy(analyzing = false, error = "回测失败: ${e.message}") }
             }
         }
+    }
+
+    // ---- 收益曲线 ----
+    fun runEquityCurve() {
+        val stocks = _state.value.watchlist
+        viewModelScope.launch {
+            _state.update { it.copy(analyzing = true, error = null) }
+            try {
+                val curve = repository.buildEquityCurve(stocks)
+                // 默认全区间对比
+                val seg = if (curve.dates.isNotEmpty()) {
+                    EquityCurveEngine.segmentCompare(curve, 0, curve.dates.size - 1)
+                } else emptyList()
+                _state.update {
+                    it.copy(
+                        equityCurve = curve,
+                        curveSegment = seg,
+                        analyzing = false
+                    )
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(analyzing = false, error = "曲线生成失败: ${e.message}") }
+            }
+        }
+    }
+
+    /** 区间变更时重算区间收益对比。 */
+    fun updateCurveSegment(start: Int, end: Int) {
+        val curve = _state.value.equityCurve ?: return
+        val seg = EquityCurveEngine.segmentCompare(curve, start, end)
+        _state.update { it.copy(curveSegment = seg) }
     }
 
     fun savePeriod(days: Int) {

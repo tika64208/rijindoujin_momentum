@@ -4,6 +4,7 @@ import android.Manifest
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,6 +20,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.momentum.ui.screen.MomentumScreen
 import com.example.momentum.ui.screen.MomentumViewModel
 import com.example.momentum.ui.screen.SettingsScreen
+import com.example.momentum.ui.screen.StockDetailScreen
 import com.example.momentum.ui.theme.SurfaceBg
 
 class MainActivity : ComponentActivity() {
@@ -48,17 +50,42 @@ class MainActivity : ComponentActivity() {
                         viewModel.rescheduleReminder()
                     }
                     var showSettings by remember { mutableStateOf(false) }
+                    var detailCode by remember { mutableStateOf<String?>(null) }
+                    var detailName by remember { mutableStateOf("") }
 
-                    if (showSettings) {
-                        SettingsScreen(
-                            onBack = { showSettings = false },
-                            viewModel = viewModel
-                        )
-                    } else {
-                        MomentumScreen(
-                            viewModel = viewModel,
-                            onOpenSettings = { showSettings = true }
-                        )
+                    // 系统返回键处理: 详情页/设置页按返回回到主页, 主页按返回才退出
+                    BackHandler(enabled = showSettings || detailCode != null) {
+                        if (detailCode != null) {
+                            detailCode = null
+                        } else if (showSettings) {
+                            showSettings = false
+                        }
+                    }
+
+                    when {
+                        showSettings -> {
+                            SettingsScreen(
+                                onBack = { showSettings = false },
+                                viewModel = viewModel
+                            )
+                        }
+                        detailCode != null -> {
+                            StockDetailScreen(
+                                code = detailCode!!,
+                                name = detailName,
+                                onBack = { detailCode = null }
+                            )
+                        }
+                        else -> {
+                            MomentumScreen(
+                                viewModel = viewModel,
+                                onOpenSettings = { showSettings = true },
+                                onStockClick = { code, name ->
+                                    detailCode = code
+                                    detailName = name
+                                }
+                            )
+                        }
                     }
                 }
             }
