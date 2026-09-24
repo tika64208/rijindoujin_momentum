@@ -32,7 +32,7 @@ fun DarkTradePanel(
         colors = CardDefaults.cardColors(containerColor = Color.White)
     ) {
         Column(Modifier.padding(12.dp)) {
-            Text("暗盘交易记录(近60日)", fontWeight = FontWeight.Bold, color = Blue700, fontSize = 15.sp)
+            Text("暗盘交易记录(近10日)", fontWeight = FontWeight.Bold, color = Blue700, fontSize = 15.sp)
             Spacer(Modifier.height(8.dp))
 
             if (records.isEmpty()) {
@@ -44,9 +44,9 @@ fun DarkTradePanel(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text("日期", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.weight(1f))
-                    Text("买入", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.weight(1f))
-                    Text("卖出", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.weight(1f))
-                    Text("总成交", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.weight(1f))
+                    Text("融资买入", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.weight(1f))
+                    Text("融券卖出", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.weight(1f))
+                    Text("净流入", fontSize = 11.sp, color = Color.Gray, modifier = Modifier.weight(1f))
                 }
                 // 数据行(按日期降序)
                 records.sortedByDescending { it.date }.forEach { r ->
@@ -66,9 +66,9 @@ fun DarkTradePanel(
                             fontSize = 12.sp, color = Green600, fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.weight(1f)
                         )
-                        val net = r.buyAmount + r.sellAmount
+                        val net = r.netAmount  // 直接采用后台字段8(净值)
                         Text(
-                            fmtYi(r.totalAmount),
+                            fmtYi(r.netAmount),
                             fontSize = 12.sp, color = if (net >= 0) Red600 else Green600,
                             fontWeight = FontWeight.Bold,
                             modifier = Modifier.weight(1f)
@@ -77,7 +77,7 @@ fun DarkTradePanel(
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "红=买入 绿=卖出  ·  暗盘为收盘后大宗交易",
+                    "红=融资买入 绿=融券卖出  ·  暗盘为盘后融资融券数据",
                     fontSize = 10.sp, color = Color.Gray
                 )
             }

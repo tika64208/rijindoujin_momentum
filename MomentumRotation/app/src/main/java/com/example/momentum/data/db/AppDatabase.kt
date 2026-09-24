@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 
 @Database(
     entities = [DailyBarEntity::class, CacheMetaEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -23,7 +23,11 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "momentum.db"
-                ).build().also { INSTANCE = it }
+                )
+                    // 主键结构变更(改用 (symbol,date) 复合主键), 破坏性迁移即可:
+                    // 旧缓存丢弃, 重新全量下载。
+                    .fallbackToDestructiveMigration()
+                    .build().also { INSTANCE = it }
             }
     }
 }

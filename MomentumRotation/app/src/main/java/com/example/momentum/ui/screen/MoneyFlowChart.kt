@@ -9,6 +9,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -38,7 +39,7 @@ fun DarkTradeTrendChart(
         colors = CardDefaults.cardColors(containerColor = Color.White)
     ) {
         Column(Modifier.padding(12.dp)) {
-            Text("暗盘交易趋势(近60日)", fontWeight = FontWeight.Bold, color = Blue700, fontSize = 15.sp)
+            Text("暗盘交易趋势(近10日)", fontWeight = FontWeight.Bold, color = Blue700, fontSize = 15.sp)
             Spacer(Modifier.height(6.dp))
             if (records.isEmpty()) {
                 Text("近期无暗盘交易", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(vertical = 20.dp))
@@ -86,27 +87,43 @@ fun DarkTradeTrendChart(
                         )
                     }
 
-                    // 柱状(总成交额, 红正绿负)
+                    // 柱状(总成交额, 红正绿负, 缺数据日灰色虚线)
                     val barW = chartW / n * 0.5f
+                    val dashEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(6f, 4f), 0f)
                     for (i in 0 until n) {
                         val v = values[i]
                         val x = xTo(i)
                         val y0 = yTo(0.0)
-                        val y = yTo(v)
-                        drawLine(
-                            if (v >= 0) Color(0xFFDC2626) else Color(0xFF16A34A),
-                            Offset(x, y0), Offset(x, y), barW
-                        )
+                        val isDummy = v == 0.0 && sorted[i].buyAmount == 0.0 && sorted[i].sellAmount == 0.0
+                        if (isDummy) {
+                            // 无数据: 灰色虚线(表示请求失败或当日无交易)
+                            drawLine(
+                                Color(0xFFBBBBBB),
+                                Offset(x, y0 - 20.dp.toPx()), Offset(x, y0 + 20.dp.toPx()),
+                                barW, pathEffect = dashEffect
+                            )
+                        } else {
+                            val y = yTo(v)
+                            drawLine(
+                                if (v >= 0) Color(0xFFDC2626) else Color(0xFF16A34A),
+                                Offset(x, y0), Offset(x, y), barW
+                            )
+                        }
                     }
 
-                    // 折线(趋势)
+                    // 折线(趋势, 跳过缺数据日)
                     val path = Path()
+                    var pathStarted = false
                     for (i in 0 until n) {
-                        val x = xTo(i)
-                        val y = yTo(values[i])
-                        if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                        val isDummy = values[i] == 0.0 && sorted[i].buyAmount == 0.0 && sorted[i].sellAmount == 0.0
+                        if (!isDummy) {
+                            val x = xTo(i)
+                            val y = yTo(values[i])
+                            if (!pathStarted) { path.moveTo(x, y); pathStarted = true }
+                            else path.lineTo(x, y)
+                        }
                     }
-                    drawPath(path, Blue700, style = Stroke(width = 2.dp.toPx()))
+                    if (pathStarted) drawPath(path, Blue700, style = Stroke(width = 2.dp.toPx()))
 
                     // X 轴日期(首尾)
                     drawContext.canvas.nativeCanvas.drawText(
@@ -117,6 +134,35 @@ fun DarkTradeTrendChart(
                         sorted.last().date.takeLast(5), xTo(n - 1), h - 2.dp.toPx(),
                         Paint().apply { color = android.graphics.Color.GRAY; textSize = 9.sp.toPx(); textAlign = Paint.Align.RIGHT }
                     )
+                }
+
+                // 自动分析结论
+                Spacer(Modifier.height(8.dp))
+                val conclusion = com.example.momentum.engine.DarkTradeAnalyzer.analyze(records)
+                if (conclusion != null) {
+                    val text = com.example.momentum.engine.DarkTradeAnalyzer.toText(conclusion)
+                    val bg = if (conclusion.todayNet > 0) Color(0xFFDCFCE7)
+                        else if (conclusion.todayNet < 0) Color(0xFFFEE2E2)
+                        else Color(0xFFF1F5F9)
+                    val fg = if (conclusion.todayNet > 0) Color(0xFF166534)
+                        else if (conclusion.todayNet < 0) Color(0xFF991B1B)
+                        else Color(0xFF334155)
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(bg, RoundedCornerShape(8.dp))
+                            .padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("📊 ", fontSize = 14.sp)
+                        Text(
+                            text,
+                            fontSize = 12.sp,
+                            color = fg,
+                            fontWeight = FontWeight.SemiBold,
+                            lineHeight = 18.sp
+                        )
+                    }
                 }
             }
         }

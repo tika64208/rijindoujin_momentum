@@ -6,6 +6,7 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.charset.Charset
 
 /**
  * 腾讯 ifzq 复权 K 线数据源(主源)。
@@ -53,7 +54,8 @@ object TencentDataSource {
     /** 股票名称, 失败返回符号本身。 */
     fun fetchStockName(symbol: String): String {
         return try {
-            val text = httpGetText("https://qt.gtimg.cn/q=$symbol")
+            // qt.gtimg.cn 返回 GBK 编码, 必须按 GBK 读, 否则名称乱码
+            val text = httpGetText("https://qt.gtimg.cn/q=$symbol", charset = Charset.forName("GBK"))
             // 形如 v_sh603991="1~领先股份~603991~...~";
             // 取 ="... 之间的内容, 再按 ~ 分割, 第2段是名称
             val body = text.substringAfter("=\"").substringBefore("\"")
@@ -301,7 +303,8 @@ object TencentDataSource {
     private fun httpGetText(
         urlStr: String,
         referer: String? = null,
-        userAgent: String = UA
+        userAgent: String = UA,
+        charset: Charset = Charsets.UTF_8
     ): String {
         val conn = URL(urlStr).openConnection() as HttpURLConnection
         try {
@@ -317,7 +320,7 @@ object TencentDataSource {
             if (code != 200) {
                 throw RuntimeException("HTTP $code")
             }
-            val reader = BufferedReader(conn.inputStream.reader(Charsets.UTF_8))
+            val reader = BufferedReader(conn.inputStream.reader(charset))
             return reader.use { it.readText() }
         } finally {
             conn.disconnect()

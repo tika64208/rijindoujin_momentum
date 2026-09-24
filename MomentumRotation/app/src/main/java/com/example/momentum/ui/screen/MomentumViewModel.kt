@@ -18,12 +18,14 @@ import com.example.momentum.model.Recommendation
 import com.example.momentum.model.Stock
 import com.example.momentum.notify.MonitorWorker
 import com.example.momentum.notify.RebalanceReminderWorker
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class UiState(
     val watchlist: List<Stock> = SAMPLE_WATCHLIST,
@@ -66,6 +68,12 @@ class MomentumViewModel(
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
+
+    init {
+        // 启动时从 SharedPreferences 读回自选股(代码+名称), 覆盖内置示例池,
+        // 使「手动添加自选」在应用关闭/重启(或进程被 kill)后依然保留。
+        loadWatchlist()
+    }
 
     /** 设置的响应式流, 供设置页绑定。 */
     val settings: StateFlow<Settings> = settingsRepo.settingsFlow
@@ -153,11 +161,59 @@ class MomentumViewModel(
         syncWatchlistToPrefs()
     }
 
-    /** 把自选股代码同步到 SharedPreferences, 供后台监控 Worker 读取。 */
+    /**
+     * 把自选股(代码 + 名称)同步到 SharedPreferences:
+     *  - `watch_codes` 纯代码逗号分隔, 供后台监控 Worker 读取(保持既有格式不破坏兼容);
+     *  - `watch_names` 与代码一一对应, 供重启后恢复名称(否则名称会丢成裸代码)。
+     */
     private fun syncWatchlistToPrefs() {
         val codes = _state.value.watchlist.joinToString(",") { it.code }
+        val names = _state.value.watchlist.joinToString(",") { it.name }
         app.getSharedPreferences("monitor", android.content.Context.MODE_PRIVATE)
-            .edit().putString("watch_codes", codes).apply()
+            .edit()
+            .putString("watch_codes", codes)
+            .putString("watch_names", names)
+            .apply()
+    }
+
+    /**
+     * 启动时从 SharedPreferences 读回自选股。已有持久化数据则覆盖内置示例池;
+     * 否则保留 SAMPLE_WATCHLIST(首次启动场景)。名称缺失时兜底为代码,
+     * 并异步联网补全名称(兼容历史遗留的"只存代码没存名称"数据)。
+     */
+    private fun loadWatchlist() {
+        val prefs = app.getSharedPreferences("monitor", android.content.Context.MODE_PRIVATE)
+        val codesStr = prefs.getString("watch_codes", "") ?: ""
+        if (codesStr.isBlank()) return
+        val codes = codesStr.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        if (codes.isEmpty()) return
+        val names = (prefs.getString("watch_names", "") ?: "").split(",")
+        val stocks = codes.mapIndexed { i, code ->
+            val name = names.getOrNull(i)?.trim()?.takeIf { it.isNotEmpty() } ?: code
+            Stock(code, name)
+        }
+        _state.update { it.copy(watchlist = stocks) }
+
+        // 名称缺失(等于代码或为空)的股票, 后台联网补全中文名
+        val needName = stocks.filter { s -> s.name == s.code || s.name.isBlank() }
+        if (needName.isNotEmpty()) {
+            viewModelScope.launch {
+                var changed = false
+                val updated = _state.value.watchlist.map { s ->
+                    if (s.name == s.code || s.name.isBlank()) {
+                        val realName = withContext(Dispatchers.IO) {
+                            TencentDataSource.fetchStockName(s.marketPrefix)
+                        }.takeIf { it != s.marketPrefix && it.isNotBlank() } ?: s.name
+                        if (realName != s.name) changed = true
+                        Stock(s.code, realName)
+                    } else s
+                }
+                if (changed) {
+                    _state.update { it.copy(watchlist = updated) }
+                    syncWatchlistToPrefs()
+                }
+            }
+        }
     }
 
     /** 开启/关闭实时监控。 */

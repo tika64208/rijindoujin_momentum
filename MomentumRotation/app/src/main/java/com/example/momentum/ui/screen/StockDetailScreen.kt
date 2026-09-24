@@ -26,6 +26,7 @@ import com.example.momentum.data.DarkTradeDataSource
 import com.example.momentum.data.MoneyFlowDataSource
 import com.example.momentum.data.TencentDataSource
 import com.example.momentum.engine.MacdEngine
+import com.example.momentum.model.DailyBar
 import com.example.momentum.model.Stock
 import com.example.momentum.ui.theme.*
 import kotlinx.coroutines.launch
@@ -50,7 +51,11 @@ fun StockDetailScreen(
     var macdData by remember { mutableStateOf<List<MacdEngine.MacdPoint>>(emptyList()) }
     var boardMacdData by remember { mutableStateOf<List<MacdEngine.MacdPoint>>(emptyList()) }
     var darkTrades by remember { mutableStateOf<List<DarkTradeDataSource.DarkTradeRecord>>(emptyList()) }
+    var darkLoading by remember { mutableStateOf(true) }
     var moneyFlows by remember { mutableStateOf<List<MoneyFlowDataSource.FlowPoint>>(emptyList()) }
+    var flowLoading by remember { mutableStateOf(true) }
+    var dailyBars by remember { mutableStateOf<List<DailyBar>>(emptyList()) }
+    var showKLine by remember { mutableStateOf(false) }  // false=分时, true=日K
     var loading by remember { mutableStateOf(true) }
 
     LaunchedEffect(code) {
@@ -69,6 +74,7 @@ fun StockDetailScreen(
             val bars = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 TencentDataSource.fetchDailyBars(symbol, 252)
             }
+            dailyBars = bars
             macdData = MacdEngine.compute(bars)
             // 板块 MACD: 用指数日线数据计算(近一年)
             val boardBars = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -77,20 +83,24 @@ fun StockDetailScreen(
             boardMacdData = MacdEngine.compute(boardBars)
             loading = false
         }
-        // 暗盘数据独立异步加载(逐日查询较慢, 不阻塞主图表)
+        // 暗盘数据(近10日, 无数据日补零)
         scope.launch {
+            darkLoading = true
             val records = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                DarkTradeDataSource.fetchHistory(code, 60)
+                DarkTradeDataSource.fetchRecent10Days(code)
             }
             darkTrades = records
+            darkLoading = false
         }
         // 主力资金独立异步加载(单次请求, 限流防反爬)
         scope.launch {
             kotlinx.coroutines.delay(800)  // 稍延迟, 避免与暗盘并发触发东财反爬
+            flowLoading = true
             val flows = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 MoneyFlowDataSource.fetchFlow(code, 30)
             }
             moneyFlows = flows
+            flowLoading = false
         }
     }
 
@@ -123,12 +133,33 @@ fun StockDetailScreen(
                     .padding(horizontal = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                // 个股分时图
-                MinuteChartCard(
-                    title = "$name 分时走势",
-                    points = stockData,
-                    modifier = Modifier.fillMaxWidth().height(220.dp)
-                )
+                // 个股图表区(分时/日K可切换)
+                if (showKLine) {
+                    KLineChart(
+                        bars = dailyBars,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                } else {
+                    MinuteChartCard(
+                        title = "$name 分时走势",
+                        points = stockData,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+                // 切换按钮
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                    androidx.compose.material3.FilterChip(
+                        selected = !showKLine,
+                        onClick = { showKLine = false },
+                        label = { Text("分时", fontSize = 11.sp) }
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    androidx.compose.material3.FilterChip(
+                        selected = showKLine,
+                        onClick = { showKLine = true },
+                        label = { Text("日K", fontSize = 11.sp) }
+                    )
+                }
 
                 // 个股 MACD 副图
                 MacdChart(
@@ -150,16 +181,24 @@ fun StockDetailScreen(
                 )
 
                 // 主力资金直方图
-                MoneyFlowChart(
-                    flows = moneyFlows,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (flowLoading) {
+                    Text("加载主力资金…", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                } else {
+                    MoneyFlowChart(
+                        flows = moneyFlows,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
 
                 // 暗盘交易趋势图
-                DarkTradeTrendChart(
-                    records = darkTrades,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (darkLoading) {
+                    Text("加载暗盘数据…", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                } else {
+                    DarkTradeTrendChart(
+                        records = darkTrades,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
 
                 Spacer(Modifier.height(12.dp))
             }

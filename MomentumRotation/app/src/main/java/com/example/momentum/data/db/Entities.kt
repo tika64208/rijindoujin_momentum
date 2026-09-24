@@ -7,9 +7,11 @@ import java.time.LocalDate
 /**
  * 单条日线记录(前复权), 按 (symbol, date) 唯一。
  */
-@Entity(tableName = "daily_bars")
+@Entity(
+    tableName = "daily_bars",
+    primaryKeys = ["symbol", "date"]
+)
 data class DailyBarEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val symbol: String,      // 如 sh603991
     val date: String,        // yyyy-MM-dd
     val open: Double,

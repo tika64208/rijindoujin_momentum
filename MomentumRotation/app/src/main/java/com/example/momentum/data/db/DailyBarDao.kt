@@ -32,4 +32,12 @@ interface DailyBarDao {
 
     @Query("SELECT * FROM cache_meta WHERE symbol = :symbol LIMIT 1")
     suspend fun getMeta(symbol: String): CacheMetaEntity?
+
+    /** 所有已缓存股票的 symbol 及其最后更新日期(用于增量下载去重)。 */
+    @Query("SELECT * FROM cache_meta")
+    suspend fun getAllMeta(): List<CacheMetaEntity>
+
+    /** 批量写入元数据。 */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertMetas(metas: List<CacheMetaEntity>)
 }
