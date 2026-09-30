@@ -1,10 +1,7 @@
 package com.example.momentum.data
 
+import com.example.momentum.data.net.HttpExecutor
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.net.HttpURLConnection
-import java.net.URL
-import java.nio.charset.Charset
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.HashMap
@@ -314,22 +311,12 @@ object DarkTradeDataSource {
         } else yyyymmdd
     }
 
-    private fun httpGet(urlStr: String): String {
-        val conn = URL(urlStr).openConnection() as HttpURLConnection
-        try {
-            conn.requestMethod = "GET"
-            conn.connectTimeout = 10_000
-            conn.readTimeout = 10_000
-            conn.setRequestProperty("User-Agent", UA)
-            conn.setRequestProperty("Referer", "https://data.eastmoney.com/")
-            conn.setRequestProperty("Accept", "*/*")
-            val code = conn.responseCode
-            if (code != 200) throw RuntimeException("HTTP $code")
-            // 东财 darktrade 接口返回 GBK 编码, 必须按 GBK 读, 否则中文乱码
-            val reader = BufferedReader(conn.inputStream.reader(Charset.forName("GBK")))
-            return reader.use { it.readText() }
-        } finally {
-            conn.disconnect()
-        }
-    }
+    private fun httpGet(urlStr: String): String =
+        HttpExecutor.get(
+            urlStr = urlStr,
+            referer = "https://data.eastmoney.com/",
+            charset = HttpExecutor.GBK,
+            connectTimeoutMs = 10_000,
+            readTimeoutMs = 10_000
+        )
 }

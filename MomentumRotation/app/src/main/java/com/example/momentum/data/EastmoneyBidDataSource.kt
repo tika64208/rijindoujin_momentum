@@ -1,10 +1,8 @@
 package com.example.momentum.data
 
+import com.example.momentum.data.net.HttpExecutor
 import com.example.momentum.engine.BidStrategy
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
 
 /**
@@ -36,7 +34,7 @@ object EastmoneyBidDataSource {
             "&ut=" + URLEncoder.encode(TOKEN, "UTF-8")
 
         return try {
-            val text = httpGet(url, "https://quote.eastmoney.com/")
+            val text = HttpExecutor.get(url, referer = "https://quote.eastmoney.com/")
             val json = JSONObject(text)
             val data = json.optJSONObject("data") ?: return emptyList()
             val diff = data.optJSONArray("diff") ?: return emptyList()
@@ -90,24 +88,6 @@ object EastmoneyBidDataSource {
             null, "-", "−", "" -> 0
             is Number -> v.toInt()
             else -> try { v.toString().toDouble().toInt() } catch (_: Exception) { 0 }
-        }
-    }
-
-    private fun httpGet(urlStr: String, referer: String): String {
-        val conn = URL(urlStr).openConnection() as HttpURLConnection
-        try {
-            conn.requestMethod = "GET"
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 15_000
-            conn.setRequestProperty("User-Agent", UA)
-            conn.setRequestProperty("Referer", referer)
-            conn.setRequestProperty("Accept", "*/*")
-            val code = conn.responseCode
-            if (code != 200) throw RuntimeException("HTTP $code")
-            val reader = BufferedReader(conn.inputStream.reader(Charsets.UTF_8))
-            return reader.use { it.readText() }
-        } finally {
-            conn.disconnect()
         }
     }
 }

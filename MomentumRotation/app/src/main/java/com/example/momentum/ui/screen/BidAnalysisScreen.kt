@@ -28,14 +28,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.momentum.data.db.BidDataEntity
 import com.example.momentum.engine.BidStrategy
 import com.example.momentum.ui.theme.*
+import com.example.momentum.util.FinanceFormatter
 
-private fun formatPrice(v: Double): String = String.format("%.2f", v)
-private fun formatPct(v: Double): String = String.format("%+.2f%%", v)
-private fun formatMv(circMv: Double): String {
-    val yi = circMv / 1e8
-    if (yi <= 0) return "-"
-    return if (yi >= 1000) String.format("%.0f亿", yi) else String.format("%.1f亿", yi)
-}
+private fun formatPrice(v: Double): String = FinanceFormatter.formatPrice(v)
+private fun formatPct(v: Double): String = FinanceFormatter.formatPct(v)
+private fun formatMv(circMv: Double): String = FinanceFormatter.formatMarketCap(circMv)
+private fun formatFilterVal(v: Double): String = FinanceFormatter.formatFilterNumber(v)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -159,11 +157,6 @@ fun BidAnalysisScreen(
             }
         }
     }
-}
-
-private fun formatFilterVal(v: Double): String {
-    if (v == 0.0) return ""
-    return if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
 }
 
 @Composable

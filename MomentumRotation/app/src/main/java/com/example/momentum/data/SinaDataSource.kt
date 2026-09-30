@@ -1,9 +1,6 @@
 package com.example.momentum.data
 
-import java.io.BufferedReader
-import java.net.HttpURLConnection
-import java.net.URL
-import java.nio.charset.Charset
+import com.example.momentum.data.net.HttpExecutor
 
 /**
  * 新浪实时行情数据源(轻量, 用于实时监控)。
@@ -35,7 +32,13 @@ object SinaDataSource {
         if (symbols.isEmpty()) return emptyMap()
         return try {
             val url = "https://hq.sinajs.cn/list=" + symbols.joinToString(",")
-            val text = httpGetGbk(url, "https://finance.sina.com.cn")
+            val text = HttpExecutor.get(
+                urlStr = url,
+                referer = "https://finance.sina.com.cn",
+                charset = HttpExecutor.GBK,
+                connectTimeoutMs = 10_000,
+                readTimeoutMs = 10_000
+            )
             val result = HashMap<String, Quote>()
             for (line in text.split("\n")) {
                 if ("=\"" !in line) continue
@@ -62,23 +65,6 @@ object SinaDataSource {
             result
         } catch (e: Exception) {
             emptyMap()
-        }
-    }
-
-    private fun httpGetGbk(urlStr: String, referer: String): String {
-        val conn = URL(urlStr).openConnection() as HttpURLConnection
-        try {
-            conn.requestMethod = "GET"
-            conn.connectTimeout = 10_000
-            conn.readTimeout = 10_000
-            conn.setRequestProperty("User-Agent", UA)
-            conn.setRequestProperty("Referer", referer)
-            val code = conn.responseCode
-            if (code != 200) throw RuntimeException("HTTP $code")
-            val bytes = conn.inputStream.readBytes()
-            return String(bytes, Charset.forName("GBK"))
-        } finally {
-            conn.disconnect()
         }
     }
 }

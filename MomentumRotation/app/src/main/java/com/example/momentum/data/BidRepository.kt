@@ -1,0 +1,214 @@
+package com.example.momentum.data
+
+import android.content.Context
+import android.content.SharedPreferences
+import com.example.momentum.data.db.AppDatabase
+import com.example.momentum.data.db.BidDataEntity
+import com.example.momentum.data.db.toBidResult
+import com.example.momentum.data.db.toEntity
+import com.example.momentum.engine.BidStrategy
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.time.DayOfWeek
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
+
+/**
+ * 竞价分析数据仓库。
+ *
+ * 职责：
+ * - 协调竞价数据网络拉取与 Room 数据库快照持久化
+ * - 9:32 时间锁：早盘竞价快照保护，防盘中/盘后被日内行情覆写
+ * - 多维条件实时筛选与内存/DB 双层检索
+ * - 历史个股 30 日竞价追溯
+ * - 筛选参数 SharedPreferences 本地持久化
+ */
+class BidRepository(
+    private val database: AppDatabase,
+    private val prefs: SharedPreferences
+) {
+    private val bidDao get() = database.bidDao()
+
+    /**
+     * 判断当前是否处于集合竞价交易时间段 (工作日 9:15 ~ 9:32)。
+     */
+    fun isBidSession(): Boolean {
+        val now = LocalTime.now()
+        val dow = LocalDate.now().dayOfWeek
+        if (dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY) return false
+        return !now.isBefore(LocalTime.of(9, 15)) && now.isBefore(LocalTime.of(9, 32))
+    }
+
+    /**
+     * 读取保存的筛选配置。
+     */
+    fun loadConfig(): BidStrategy.BidConfig {
+        val defaultCfg = BidStrategy.BidConfig.DEFAULT
+        val saved = BidStrategy.BidConfig(
+            bidMin = prefs.getFloat("bidMin", defaultCfg.bidMin.toFloat()).toDouble(),
+            bidMax = prefs.getFloat("bidMax", defaultCfg.bidMax.toFloat()).toDouble(),
+            priceMin = prefs.getFloat("priceMin", defaultCfg.priceMin.toFloat()).toDouble(),
+            priceMax = prefs.getFloat("priceMax", defaultCfg.priceMax.toFloat()).toDouble(),
+            mvMin = prefs.getFloat("mvMin", defaultCfg.mvMin.toFloat()).toDouble(),
+            mvMax = prefs.getFloat("mvMax", defaultCfg.mvMax.toFloat()).toDouble(),
+            probMin = prefs.getFloat("probMin", defaultCfg.probMin.toFloat()).toDouble(),
+            probMax = prefs.getFloat("probMax", defaultCfg.probMax.toFloat()).toDouble(),
+            confMin = prefs.getFloat("confMin", defaultCfg.confMin.toFloat()).toDouble(),
+            confMax = prefs.getFloat("confMax", defaultCfg.confMax.toFloat()).toDouble(),
+            scoreMin = prefs.getFloat("scoreMin", defaultCfg.scoreMin.toFloat()).toDouble(),
+            scoreMax = prefs.getFloat("scoreMax", defaultCfg.scoreMax.toFloat()).toDouble(),
+            filterStSuspend = prefs.getBoolean("stSuspend", defaultCfg.filterStSuspend),
+            filterLimitUp = prefs.getBoolean("limitUp", defaultCfg.filterLimitUp),
+            marketHs = prefs.getBoolean("marketHs", defaultCfg.marketHs),
+            marketCyb = prefs.getBoolean("marketCyb", defaultCfg.marketCyb),
+            marketKcb = prefs.getBoolean("marketKcb", defaultCfg.marketKcb)
+        )
+        if (prefs.contains("bidMin")) {
+            // 若为旧版本残留的过严默认配置(bidMin==7.0且probMax==65.0)，重置为默认值
+            return if (saved.bidMin == 7.0 && saved.probMax == 65.0) {
+                saveConfig(defaultCfg)
+                defaultCfg
+            } else {
+                saved
+            }
+        }
+        return defaultCfg
+    }
+
+    /**
+     * 持久化保存筛选配置。
+     */
+    fun saveConfig(cfg: BidStrategy.BidConfig) {
+        prefs.edit()
+            .putFloat("bidMin", cfg.bidMin.toFloat())
+            .putFloat("bidMax", cfg.bidMax.toFloat())
+            .putFloat("priceMin", cfg.priceMin.toFloat())
+            .putFloat("priceMax", cfg.priceMax.toFloat())
+            .putFloat("mvMin", cfg.mvMin.toFloat())
+            .putFloat("mvMax", cfg.mvMax.toFloat())
+            .putFloat("probMin", cfg.probMin.toFloat())
+            .putFloat("probMax", cfg.probMax.toFloat())
+            .putFloat("confMin", cfg.confMin.toFloat())
+            .putFloat("confMax", cfg.confMax.toFloat())
+            .putFloat("scoreMin", cfg.scoreMin.toFloat())
+            .putFloat("scoreMax", cfg.scoreMax.toFloat())
+            .putBoolean("stSuspend", cfg.filterStSuspend)
+            .putBoolean("limitUp", cfg.filterLimitUp)
+            .putBoolean("marketHs", cfg.marketHs)
+            .putBoolean("marketCyb", cfg.marketCyb)
+            .putBoolean("marketKcb", cfg.marketKcb)
+            .apply()
+    }
+
+    /**
+     * 刷新并持久化全市场竞价数据。
+     * @return 实际存入的股票条数
+     */
+    suspend fun refresh(config: BidStrategy.BidConfig, force: Boolean = false): Result<Int> =
+        withContext(Dispatchers.IO) {
+            try {
+                val today = LocalDate.now().toString()
+                val now = LocalTime.now()
+                val existingCount = bidDao.countByDate(today)
+
+                // 快照保护锁：非竞价时段且今天已有快照，9:32 后跳过网络覆盖
+                if (!force && !isBidSession() && existingCount > 0 && now.isAfter(LocalTime.of(9, 32))) {
+                    return@withContext Result.success(existingCount)
+                }
+
+                val rawItems = EastmoneyBidDataSource.fetchAll()
+                if (rawItems.isEmpty()) {
+                    return@withContext Result.failure(RuntimeException("未拉取到竞价数据"))
+                }
+
+                val savedAt = now.format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                val entities = rawItems.map { item ->
+                    val result = BidStrategy.compute(item, config)
+                    item.toEntity(today, result, savedAt)
+                }
+                bidDao.insertAll(entities)
+                Result.success(entities.size)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
+    /**
+     * 从 DB 读取并按当前配置动态过滤，返回过滤后的列表与时间快照。
+     */
+    suspend fun getFilteredResults(
+        config: BidStrategy.BidConfig,
+        date: String = LocalDate.now().toString()
+    ): Pair<List<BidStrategy.BidResult>, String> =
+        withContext(Dispatchers.IO) {
+            val entities = bidDao.getByDate(date)
+            val filtered = entities.filter { applyFilter(it, config) }
+                .map { it.toBidResult() }
+                .sortedByDescending { it.probability }
+            val savedAt = entities.firstOrNull()?.savedAt ?: ""
+            filtered to savedAt
+        }
+
+    /**
+     * 多维条件实时筛选判断。
+     */
+    fun applyFilter(e: BidDataEntity, cfg: BidStrategy.BidConfig): Boolean {
+        // ST / 停牌剔除
+        if (cfg.filterStSuspend && (e.name.contains("ST", ignoreCase = true) || e.name.contains("停", ignoreCase = true))) {
+            return false
+        }
+        // 昨日涨停剔除
+        if (cfg.filterLimitUp && e.warnFlag >= 5) return false
+
+        // 市场筛选
+        if (!cfg.marketHs && !cfg.marketCyb && !cfg.marketKcb) return false
+        val isHs = (e.code.startsWith("6") && !e.code.startsWith("688")) || e.code.startsWith("00")
+        val isCyb = e.code.startsWith("3")
+        val isKcb = e.code.startsWith("688")
+        if (isHs && !cfg.marketHs) return false
+        if (isCyb && !cfg.marketCyb) return false
+        if (isKcb && !cfg.marketKcb) return false
+
+        // 区间条件判断
+        if (cfg.bidMin > 0 && e.bidChange < cfg.bidMin) return false
+        if (cfg.bidMax > 0 && e.bidChange > cfg.bidMax) return false
+        if (cfg.probMin > 0 && e.probability < cfg.probMin) return false
+        if (cfg.probMax > 0 && e.probability > cfg.probMax) return false
+        if (cfg.confMin > 0 && e.confidence < cfg.confMin) return false
+        if (cfg.confMax > 0 && e.confidence > cfg.confMax) return false
+        if (cfg.scoreMin > 0 && e.score < cfg.scoreMin) return false
+        if (cfg.scoreMax > 0 && e.score > cfg.scoreMax) return false
+        if (cfg.mvMin > 0 && e.circMv / 1e8 < cfg.mvMin) return false
+        if (cfg.mvMax > 0 && e.circMv / 1e8 > cfg.mvMax) return false
+        if (cfg.priceMin > 0 && e.latestPrice < cfg.priceMin) return false
+        if (cfg.priceMax > 0 && e.latestPrice > cfg.priceMax) return false
+        if (cfg.filterLargeVolume && e.volume < cfg.filterLargeVolumeThreshold) return false
+
+        return true
+    }
+
+    /**
+     * 查询个股最近 30 天历史竞价记录。
+     */
+    suspend fun searchHistory(code: String, limit: Int = 30): List<BidDataEntity> =
+        withContext(Dispatchers.IO) {
+            bidDao.getHistory(code, limit)
+        }
+
+    /**
+     * 获取已有竞价数据的历史日期列表。
+     */
+    suspend fun getAvailableDates(limit: Int = 30): List<String> =
+        withContext(Dispatchers.IO) {
+            bidDao.getDates(limit)
+        }
+
+    companion object {
+        fun create(context: Context): BidRepository {
+            val db = AppDatabase.get(context)
+            val prefs = context.getSharedPreferences("bid_config", Context.MODE_PRIVATE)
+            return BidRepository(db, prefs)
+        }
+    }
+}

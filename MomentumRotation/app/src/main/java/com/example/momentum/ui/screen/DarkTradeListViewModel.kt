@@ -4,21 +4,13 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.momentum.data.DarkTradeDataSource
-import com.example.momentum.data.MainFundDataSource
-import com.example.momentum.data.MarginDataSource
-import com.example.momentum.data.db.AppDatabase
-import com.example.momentum.data.db.DarkTradeDataEntity
-import kotlinx.coroutines.Dispatchers
+import com.example.momentum.data.DarkTradeRepository
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.util.HashMap
 import java.time.LocalDate
-import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 
 /**
@@ -109,16 +101,14 @@ enum class DarkSortField(val label: String) {
  */
 class DarkTradeListViewModel(application: Application) : AndroidViewModel(application) {
 
+    private val repository: DarkTradeRepository = DarkTradeRepository.create(application)
+
     private val _state = MutableStateFlow(DarkTradeListState())
     val state: StateFlow<DarkTradeListState> = _state
 
-    private val database get() = AppDatabase.get(getApplication())
     private var loadJob: Job? = null
     private var detailJob: Job? = null
     private var saveJob: Job? = null
-
-    // 展开详情内存缓存(code → StockDetailData), App 存活期间有效
-    private val detailCache = HashMap<String, StockDetailData>()
 
     /** 全量下载当日暗盘并存入 DB。 */
     fun refreshAndSave() {
@@ -126,33 +116,13 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
         saveJob?.cancel()
         _state.update { it.copy(loading = true, error = null) }
         saveJob = viewModelScope.launch {
-            try {
-                val date = _state.value.date
-                // 清内存缓存, 强制重新从接口拉最新数据
-                DarkTradeDataSource.clearCache()
-                val all = withContext(Dispatchers.IO) {
-                    DarkTradeDataSource.fetchAllDarkTrade(date)
-                }
-                // 存入 DB
-                val today = LocalDate.now().toString()
-                val savedAt = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
-                withContext(Dispatchers.IO) {
-                    val entities = all.map { r ->
-                        DarkTradeDataEntity(
-                            code = r.code, date = today, name = r.name,
-                            industry = r.industry, concept = r.concept,
-                            buyAmount = r.buyAmount, sellAmount = r.sellAmount,
-                            totalAmount = r.totalAmount, netAmount = r.netAmount,
-                            volume = r.volume, ratio = r.ratio, savedAt = savedAt
-                        )
-                    }
-                    database.darkTradeDao().insertAll(entities)
-                }
+            val result = repository.getDarkTradeRecords(_state.value.date, forceRefresh = true)
+            result.onSuccess { all ->
                 _state.update {
                     it.copy(records = all, loading = false, totalCount = all.size, hasMore = false)
                 }
-            } catch (e: Exception) {
-                _state.update { it.copy(loading = false, error = "暗盘下载失败: ${e.message}") }
+            }.onFailure { err ->
+                _state.update { it.copy(loading = false, error = "暗盘下载失败: ${err.message}") }
             }
         }
     }
@@ -162,10 +132,8 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
         loadJob?.cancel()
         _state.update { DarkTradeListState(date = date, loading = true) }
         loadJob = viewModelScope.launch {
-            try {
-                val all = withContext(Dispatchers.IO) {
-                    DarkTradeDataSource.fetchAllDarkTrade(date)
-                }
+            val result = repository.getDarkTradeRecords(date, forceRefresh = false)
+            result.onSuccess { all ->
                 _state.update {
                     it.copy(
                         records = all,
@@ -175,8 +143,8 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
                         error = null
                     )
                 }
-            } catch (e: Exception) {
-                _state.update { it.copy(loading = false, error = "加载失败: ${e.message}") }
+            }.onFailure { err ->
+                _state.update { it.copy(loading = false, error = "加载失败: ${err.message}") }
             }
         }
     }
@@ -198,7 +166,7 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
             return
         }
         // 先查内存缓存(当日已拉过一次就不再重拉)
-        val cached = detailCache[record.code]
+        val cached = repository.getCachedDetail(record.code)
         if (cached != null) {
             _state.update { it.copy(expandedCode = record.code, detail = cached.copy(loadingDetail = false)) }
             return
@@ -218,34 +186,9 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
         _state.update { it.copy(expandedCode = record.code, detail = stub) }
         detailJob?.cancel()
         detailJob = viewModelScope.launch {
-            // 并行拉取资金流 + 两融
-            val flow = withContext(Dispatchers.IO) { MainFundDataSource.fetchFundFlow(record.code) }
-            val margin = withContext(Dispatchers.IO) { MarginDataSource.fetchMargin(record.code) }
-            android.util.Log.d("DarkTrade", "展开 ${record.code}: mainNet=${flow.mainNet} smallNet=${flow.smallNet} marginBuy=${margin.buy}")
+            val detail = repository.getStockDetail(record)
             _state.update {
-                // 用户可能已收起或展开别的股票, 只更新仍展开的那只
                 if (it.expandedCode == record.code) {
-                    val detail = StockDetailData(
-                        code = record.code,
-                        name = record.name,
-                        darkBuy = record.buyAmount,
-                        darkSell = record.sellAmount,
-                        darkNet = record.netAmount,
-                        mainNet = flow.mainNet,
-                        smallNet = flow.smallNet,
-                        midNet = flow.midNet,
-                        bigNet = flow.bigNet,
-                        superNet = flow.superNet,
-                        mainRatio = flow.mainRatio,
-                        smallRatio = flow.smallRatio,
-                        marginBuy = margin.buy,
-                        marginRepay = margin.repay,
-                        marginNet = margin.netBuy,
-                        marginBalance = margin.balance,
-                        loadingDetail = false
-                    )
-                    // 写入内存缓存(当日有效)
-                    detailCache[record.code] = detail
                     it.copy(detail = detail)
                 } else it
             }

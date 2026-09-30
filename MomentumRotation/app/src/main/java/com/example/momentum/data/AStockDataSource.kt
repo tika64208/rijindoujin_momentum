@@ -1,10 +1,8 @@
 package com.example.momentum.data
 
+import com.example.momentum.data.net.HttpExecutor
 import com.example.momentum.model.DailyBar
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * 全 A 股代码列表 + 东财历史日线数据源。
@@ -35,7 +33,7 @@ object AStockDataSource {
                 "&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23" +
                 "&fields=f12,f14"
             try {
-                val text = httpGet(url, "https://quote.eastmoney.com/")
+                val text = HttpExecutor.get(url, referer = "https://quote.eastmoney.com/")
                 val json = JSONObject(text)
                 val data = json.optJSONObject("data") ?: break
                 val total = data.optInt("total", 0)
@@ -69,7 +67,7 @@ object AStockDataSource {
             "&klt=101&fqt=1&beg=$beg&end=$end"
 
         return try {
-            val text = httpGet(url, "https://quote.eastmoney.com/")
+            val text = HttpExecutor.get(url, referer = "https://quote.eastmoney.com/")
             val json = JSONObject(text)
             val data = json.optJSONObject("data") ?: return emptyList()
             val klines = data.optJSONArray("klines") ?: return emptyList()
@@ -93,24 +91,6 @@ object AStockDataSource {
             bars
         } catch (e: Exception) {
             emptyList()
-        }
-    }
-
-    private fun httpGet(urlStr: String, referer: String): String {
-        val conn = URL(urlStr).openConnection() as HttpURLConnection
-        try {
-            conn.requestMethod = "GET"
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 15_000
-            conn.setRequestProperty("User-Agent", UA)
-            conn.setRequestProperty("Referer", referer)
-            conn.setRequestProperty("Accept", "*/*")
-            val code = conn.responseCode
-            if (code != 200) throw RuntimeException("HTTP $code")
-            val reader = BufferedReader(conn.inputStream.reader(Charsets.UTF_8))
-            return reader.use { it.readText() }
-        } finally {
-            conn.disconnect()
         }
     }
 }

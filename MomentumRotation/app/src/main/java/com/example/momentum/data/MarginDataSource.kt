@@ -1,10 +1,8 @@
 package com.example.momentum.data
 
+import com.example.momentum.data.net.HttpExecutor
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.net.HttpURLConnection
-import java.net.URL
 import java.net.URLEncoder
 
 /**
@@ -65,21 +63,11 @@ object MarginDataSource {
         }
     }
 
-    private fun httpGet(urlStr: String): String {
-        val conn = URL(urlStr).openConnection() as HttpURLConnection
-        try {
-            conn.requestMethod = "GET"
-            conn.connectTimeout = 10_000
-            conn.readTimeout = 10_000
-            conn.setRequestProperty("User-Agent", UA)
-            conn.setRequestProperty("Referer", "https://data.eastmoney.com/")
-            conn.setRequestProperty("Accept", "*/*")
-            val code = conn.responseCode
-            if (code != 200) throw RuntimeException("HTTP $code")
-            val reader = BufferedReader(conn.inputStream.reader(Charsets.UTF_8))
-            return reader.use { it.readText() }
-        } finally {
-            conn.disconnect()
-        }
-    }
+    private fun httpGet(urlStr: String): String =
+        HttpExecutor.get(
+            urlStr = urlStr,
+            referer = "https://data.eastmoney.com/",
+            connectTimeoutMs = 10_000,
+            readTimeoutMs = 10_000
+        )
 }

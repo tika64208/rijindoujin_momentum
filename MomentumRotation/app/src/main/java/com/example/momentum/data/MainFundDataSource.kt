@@ -1,9 +1,7 @@
 package com.example.momentum.data
 
+import com.example.momentum.data.net.HttpExecutor
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.net.HttpURLConnection
-import java.net.URL
 
 /**
  * 个股资金流数据源(东方财富 push2his 历史资金流)。
@@ -77,25 +75,12 @@ object MainFundDataSource {
         return FundFlow(code, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     }
 
-    private fun httpGet(urlStr: String): String {
-        val conn = URL(urlStr).openConnection() as HttpURLConnection
-        try {
-            conn.requestMethod = "GET"
-            conn.connectTimeout = 15_000
-            conn.readTimeout = 15_000
-            conn.setRequestProperty("User-Agent", UA)
-            conn.setRequestProperty("Referer", "https://data.eastmoney.com/")
-            conn.setRequestProperty("Accept", "*/*")
-            conn.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9")
-            conn.setRequestProperty("Connection", "close")
-            conn.useCaches = false
-            val code = conn.responseCode
-            if (code != 200) throw RuntimeException("HTTP $code")
-            // 读原始字节流再按 UTF-8 解码, 避免 Reader 边界的 intermittent 断流
-            val bytes = conn.inputStream.readBytes()
-            return String(bytes, Charsets.UTF_8)
-        } finally {
-            conn.disconnect()
-        }
-    }
+    private fun httpGet(urlStr: String): String =
+        HttpExecutor.get(
+            urlStr = urlStr,
+            referer = "https://data.eastmoney.com/",
+            headers = mapOf("Connection" to "close", "Accept-Language" to "zh-CN,zh;q=0.9"),
+            connectTimeoutMs = 15_000,
+            readTimeoutMs = 15_000
+        )
 }
