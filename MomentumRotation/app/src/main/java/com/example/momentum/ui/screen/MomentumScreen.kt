@@ -34,6 +34,8 @@ import kotlin.math.abs
 @Composable
 fun MomentumScreen(
     viewModel: MomentumViewModel = viewModel(),
+    downloadVm: DownloadViewModel = viewModel(),
+    downloadState: DownloadState = DownloadState(),
     onOpenSettings: () -> Unit = {},
     onStockClick: (code: String, name: String) -> Unit = { _, _ -> }
 ) {
@@ -46,6 +48,16 @@ fun MomentumScreen(
                     Text("动量轮动选股助手", fontWeight = FontWeight.Bold)
                 },
                 actions = {
+                    // 下载日线按钮
+                    if (downloadState.running) {
+                        Text("更新 ${downloadState.progressPercent}%", color = Color.White, fontSize = 11.sp, modifier = Modifier.padding(end = 4.dp))
+                    }
+                    TextButton(
+                        onClick = { downloadVm.startIfIdle() },
+                        enabled = !downloadState.running
+                    ) {
+                        Text(if (downloadState.running) "下载中…" else "下载日线", fontSize = 11.sp, color = Color.White)
+                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(
                             Icons.Filled.Settings,

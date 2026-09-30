@@ -6,14 +6,19 @@ import androidx.lifecycle.viewModelScope
 import com.example.momentum.data.DarkTradeDataSource
 import com.example.momentum.data.MainFundDataSource
 import com.example.momentum.data.MarginDataSource
+import com.example.momentum.data.db.AppDatabase
+import com.example.momentum.data.db.DarkTradeDataEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.HashMap
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 
 /**
@@ -107,8 +112,50 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
     private val _state = MutableStateFlow(DarkTradeListState())
     val state: StateFlow<DarkTradeListState> = _state
 
+    private val database get() = AppDatabase.get(getApplication())
     private var loadJob: Job? = null
     private var detailJob: Job? = null
+    private var saveJob: Job? = null
+
+    // 展开详情内存缓存(code → StockDetailData), App 存活期间有效
+    private val detailCache = HashMap<String, StockDetailData>()
+
+    /** 全量下载当日暗盘并存入 DB。 */
+    fun refreshAndSave() {
+        if (_state.value.loading) return
+        saveJob?.cancel()
+        _state.update { it.copy(loading = true, error = null) }
+        saveJob = viewModelScope.launch {
+            try {
+                val date = _state.value.date
+                // 清内存缓存, 强制重新从接口拉最新数据
+                DarkTradeDataSource.clearCache()
+                val all = withContext(Dispatchers.IO) {
+                    DarkTradeDataSource.fetchAllDarkTrade(date)
+                }
+                // 存入 DB
+                val today = LocalDate.now().toString()
+                val savedAt = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                withContext(Dispatchers.IO) {
+                    val entities = all.map { r ->
+                        DarkTradeDataEntity(
+                            code = r.code, date = today, name = r.name,
+                            industry = r.industry, concept = r.concept,
+                            buyAmount = r.buyAmount, sellAmount = r.sellAmount,
+                            totalAmount = r.totalAmount, netAmount = r.netAmount,
+                            volume = r.volume, ratio = r.ratio, savedAt = savedAt
+                        )
+                    }
+                    database.darkTradeDao().insertAll(entities)
+                }
+                _state.update {
+                    it.copy(records = all, loading = false, totalCount = all.size, hasMore = false)
+                }
+            } catch (e: Exception) {
+                _state.update { it.copy(loading = false, error = "暗盘下载失败: ${e.message}") }
+            }
+        }
+    }
 
     /** 更换日期: 一次性全量拉取当日全部暗盘记录。 */
     fun loadDate(date: String) {
@@ -150,6 +197,12 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
             detailJob?.cancel()
             return
         }
+        // 先查内存缓存(当日已拉过一次就不再重拉)
+        val cached = detailCache[record.code]
+        if (cached != null) {
+            _state.update { it.copy(expandedCode = record.code, detail = cached.copy(loadingDetail = false)) }
+            return
+        }
         // 先展示暗盘已有字段, 详情资金流/两融置为加载中
         val stub = StockDetailData(
             code = record.code,
@@ -172,27 +225,28 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
             _state.update {
                 // 用户可能已收起或展开别的股票, 只更新仍展开的那只
                 if (it.expandedCode == record.code) {
-                    it.copy(
-                        detail = StockDetailData(
-                            code = record.code,
-                            name = record.name,
-                            darkBuy = record.buyAmount,
-                            darkSell = record.sellAmount,
-                            darkNet = record.netAmount,
-                            mainNet = flow.mainNet,
-                            smallNet = flow.smallNet,
-                            midNet = flow.midNet,
-                            bigNet = flow.bigNet,
-                            superNet = flow.superNet,
-                            mainRatio = flow.mainRatio,
-                            smallRatio = flow.smallRatio,
-                            marginBuy = margin.buy,
-                            marginRepay = margin.repay,
-                            marginNet = margin.netBuy,
-                            marginBalance = margin.balance,
-                            loadingDetail = false
-                        )
+                    val detail = StockDetailData(
+                        code = record.code,
+                        name = record.name,
+                        darkBuy = record.buyAmount,
+                        darkSell = record.sellAmount,
+                        darkNet = record.netAmount,
+                        mainNet = flow.mainNet,
+                        smallNet = flow.smallNet,
+                        midNet = flow.midNet,
+                        bigNet = flow.bigNet,
+                        superNet = flow.superNet,
+                        mainRatio = flow.mainRatio,
+                        smallRatio = flow.smallRatio,
+                        marginBuy = margin.buy,
+                        marginRepay = margin.repay,
+                        marginNet = margin.netBuy,
+                        marginBalance = margin.balance,
+                        loadingDetail = false
                     )
+                    // 写入内存缓存(当日有效)
+                    detailCache[record.code] = detail
+                    it.copy(detail = detail)
                 } else it
             }
         }
@@ -201,6 +255,7 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
     override fun onCleared() {
         loadJob?.cancel()
         detailJob?.cancel()
+        saveJob?.cancel()
         super.onCleared()
     }
 

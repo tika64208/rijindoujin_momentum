@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">MYTT选股器</string>
+    <string name="hint_code">输入6位股票代码, 如 600519</string>
+    <string name="btn_query">查询信号</string>
+    <string name="title_hint">MYTT 选股器(万手单 AND 寻龙诀4号)</string>
+</resources>

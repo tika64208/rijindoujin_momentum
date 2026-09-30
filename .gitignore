@@ -7,12 +7,20 @@ MomentumRotation/local.properties
 MomentumRotation/.idea/
 MomentumRotation/*.iml
 
-# Python
+mytt_android/.gradle/
+mytt_android/.kotlin/
+mytt_android/app/build/
+mytt_android/build/
+mytt_android/local.properties
+mytt_android/*.apk
+
+# Python & Data
 __pycache__/
 *.pyc
 *.pyo
 .venv/
 venv/
+*.parquet
 
 # 系统
 .DS_Store

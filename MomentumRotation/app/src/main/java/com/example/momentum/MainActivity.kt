@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -31,6 +32,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -49,6 +51,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.momentum.ui.screen.BidAnalysisScreen
 import com.example.momentum.ui.screen.DarkTradeListScreen
 import com.example.momentum.ui.screen.DownloadState
 import com.example.momentum.ui.screen.DownloadViewModel
@@ -71,7 +74,8 @@ private data class MainTab(
 private val mainTabs = listOf(
     MainTab("main/watchlist", "自选股", Icons.AutoMirrored.Filled.List),
     MainTab("main/darktrade", "全量暗盘", Icons.AutoMirrored.Filled.ShowChart),
-    MainTab("main/myatt", "MYTT选股", Icons.Filled.Search)
+    MainTab("main/myatt", "MYTT选股", Icons.Filled.Search),
+    MainTab("main/bid", "竞价分析", Icons.Filled.Star)
 )
 
 class MainActivity : ComponentActivity() {
@@ -79,6 +83,11 @@ class MainActivity : ComponentActivity() {
     // Android 13+ 通知权限请求
     private val notificationPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -114,15 +123,30 @@ private fun AppNavHost() {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
 
-    // 全 A 股日线增量下载
+    // 全 A 股日线增量下载(手动触发)
     val downloadVm: DownloadViewModel = viewModel()
     val downloadState by downloadVm.state.collectAsState()
-    androidx.compose.runtime.LaunchedEffect(Unit) {
-        downloadVm.startIfIdle()
+
+    val context = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(Unit) {
+        val targetTab = (context as? android.app.Activity)?.intent?.getStringExtra("tab")
+        if (targetTab != null) {
+            val route = if (targetTab.startsWith("main/")) targetTab else "main/$targetTab"
+            if (mainTabs.any { it.route == route }) {
+                navController.navigate(route) {
+                    popUpTo(navController.graph.findStartDestination().id) {
+                        saveState = true
+                    }
+                    launchSingleTop = true
+                    restoreState = true
+                }
+            }
+        }
     }
 
     // 底部导航仅在主 tab 页显示(详情/设置页隐藏)
-    val showBottomBar = currentRoute == mainTabs[0].route || currentRoute == mainTabs[1].route || currentRoute == mainTabs[2].route
+    val showBottomBar = currentRoute == mainTabs[0].route || currentRoute == mainTabs[1].route 
+        || currentRoute == mainTabs[2].route || currentRoute == mainTabs[3].route
 
     Box(Modifier.fillMaxSize()) {
         Scaffold(
@@ -160,6 +184,8 @@ private fun AppNavHost() {
                 val viewModel: MomentumViewModel = viewModel()
                 MomentumScreen(
                     viewModel = viewModel,
+                    downloadVm = downloadVm,
+                    downloadState = downloadState,
                     onOpenSettings = { navController.navigate("settings") },
                     onStockClick = { code, name ->
                         navController.navigate("detail/$code/$name")
@@ -175,6 +201,12 @@ private fun AppNavHost() {
             // MYTT 选股 tab
             composable(mainTabs[2].route) {
                 MyttScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+            // 竞价分析 tab
+            composable(mainTabs[3].route) {
+                BidAnalysisScreen(
                     onBack = { navController.popBackStack() }
                 )
             }

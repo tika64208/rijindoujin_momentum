@@ -188,7 +188,9 @@ object DarkTradeDataSource {
             // 已拿满总数则结束
             if (p.totalCount > 0 && result.size >= p.totalCount) break
             page++
-            if (page > 250) break  // 安全上限
+            if (page > 250) break
+            // 页间延迟: 降低东财反爬风险
+            try { Thread.sleep(120) } catch (_: InterruptedException) {}
         }
         if (result.isNotEmpty()) cacheByDate[date] = result
         return result

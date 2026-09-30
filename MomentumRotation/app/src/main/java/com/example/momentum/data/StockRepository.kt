@@ -13,6 +13,9 @@ import com.example.momentum.model.DailyBar
 import com.example.momentum.model.Recommendation
 import com.example.momentum.model.Stock
 import com.example.momentum.model.StockMomentum
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
@@ -103,8 +106,11 @@ class StockRepository(
         stocks: List<Stock>,
         config: StrategyConfig
     ): Triple<List<Recommendation>, MomentumEngine.RankMeta, DataOrigin> =
-        withContext(Dispatchers.IO) {
-            val results = stocks.map { loadMomentum(it, config) }
+        coroutineScope {
+            val deferred = stocks.map { stock ->
+                async { loadMomentum(stock, config) }
+            }
+            val results = deferred.awaitAll()
             val momentums = results.map { it.first }
             val origins = results.map { it.second }
             // 整体数据来源: 有联网成功的记为 FRESH, 否则 CACHE/OFFLINE

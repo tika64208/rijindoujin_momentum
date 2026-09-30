@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.Mytt" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">#C62828</item>
+        <item name="colorPrimaryDark">#8E0000</item>
+        <item name="colorAccent">#C62828</item>
+    </style>
+</resources>

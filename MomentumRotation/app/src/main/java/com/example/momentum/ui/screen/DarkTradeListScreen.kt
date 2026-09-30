@@ -64,7 +64,8 @@ fun DarkTradeListScreen(
         containerColor = SurfaceBg
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            SummaryBar(state, onDateChange = { viewModel.loadDate(it) })
+            SummaryBar(state, onDateChange = { viewModel.loadDate(it) },
+                onRefresh = { viewModel.refreshAndSave() })
 
             // 搜索框
             SearchBar(
@@ -130,7 +131,7 @@ fun DarkTradeListScreen(
 }
 
 @Composable
-private fun SummaryBar(state: DarkTradeListState, onDateChange: (String) -> Unit) {
+private fun SummaryBar(state: DarkTradeListState, onDateChange: (String) -> Unit, onRefresh: () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
         shape = RoundedCornerShape(10.dp),
@@ -152,6 +153,10 @@ private fun SummaryBar(state: DarkTradeListState, onDateChange: (String) -> Unit
             Spacer(Modifier.weight(1f))
             if (state.totalCount > 0) {
                 Text("共 ${state.totalCount} 条", fontSize = 12.sp, color = Color.Gray)
+                Spacer(Modifier.width(8.dp))
+            }
+            TextButton(onClick = onRefresh, enabled = !state.loading) {
+                Text("刷新", fontSize = 13.sp, color = Blue700)
             }
         }
     }
