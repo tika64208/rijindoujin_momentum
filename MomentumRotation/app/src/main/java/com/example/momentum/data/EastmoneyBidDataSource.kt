@@ -42,9 +42,8 @@ object EastmoneyBidDataSource {
             for (i in 0 until diff.length()) {
                 val row = diff.optJSONObject(i) ?: continue
                 val f2 = optDouble(row, "f2")
-                val f4 = optDouble(row, "f4")
                 val f17 = optDouble(row, "f17")
-                val openPrice = if (f17 > 0) f17 else f4
+                val openPrice = if (f17 > 0) f17 else f2
 
                 items.add(
                     BidStrategy.BidItem(

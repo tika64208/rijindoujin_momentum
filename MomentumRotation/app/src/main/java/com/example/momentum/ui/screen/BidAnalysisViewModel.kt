@@ -70,7 +70,7 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
     fun isBidSession(): Boolean = repository.isBidSession()
 
     /**
-     * 拉取全市场竞价数据并更新本地快照（受 9:32 时间锁保护）。
+     * 拉取全市场竞价与盘中最新行情并更新本地快照。
      */
     fun refresh() {
         if (_state.value.loading) return
@@ -80,7 +80,7 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
             val result = repository.refresh(_state.value.config)
             result.onSuccess {
                 _state.update { it.copy(loading = false) }
-                loadFiltered()
+                loadFiltered(autoRefreshIfStale = false)
             }.onFailure { err ->
                 _state.update { it.copy(loading = false, error = "获取竞价数据失败: ${err.message}") }
             }
@@ -89,12 +89,21 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
 
     /**
      * 从本地 DB 按当前筛选条件加载展示列表。
+     * 若数据为空，或已保存的数据属于早盘开盘前(<=09:30)且当前已经开盘，自动后台拉取一次最新盘中行情。
      */
-    fun loadFiltered() {
+    fun loadFiltered(autoRefreshIfStale: Boolean = true) {
         viewModelScope.launch {
             val (results, savedAt) = repository.getFilteredResults(_state.value.config)
             _state.update {
                 it.copy(results = results.take(500), savedAt = savedAt)
+            }
+            if (autoRefreshIfStale) {
+                val now = java.time.LocalTime.now()
+                val isTradingOrAfter = now.isAfter(java.time.LocalTime.of(9, 30))
+                val isBeforeOpenSnapshot = savedAt.isNotEmpty() && savedAt < "09:30:00"
+                if (results.isEmpty() || (isTradingOrAfter && isBeforeOpenSnapshot)) {
+                    refresh()
+                }
             }
         }
     }

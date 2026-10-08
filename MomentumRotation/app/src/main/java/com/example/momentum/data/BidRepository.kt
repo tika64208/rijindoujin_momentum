@@ -102,30 +102,46 @@ class BidRepository(
     }
 
     /**
-     * 刷新并持久化全市场竞价数据。
+     * 刷新并持久化全市场竞价与盘中最新行情。
+     * - 盘中随时可刷新：更新最新价、实时涨幅(f3)、成交量等；
+     * - 竞价涨幅(f615)保持为 9:25 开盘竞价数值，若接口后续为 0 则自动继承早盘快照；
+     * - 时间快照更新为当前刷新时间。
      * @return 实际存入的股票条数
      */
-    suspend fun refresh(config: BidStrategy.BidConfig, force: Boolean = false): Result<Int> =
+    suspend fun refresh(config: BidStrategy.BidConfig, force: Boolean = true): Result<Int> =
         withContext(Dispatchers.IO) {
             try {
                 val today = LocalDate.now().toString()
                 val now = LocalTime.now()
-                val existingCount = bidDao.countByDate(today)
-
-                // 快照保护锁：非竞价时段且今天已有快照，9:32 后跳过网络覆盖
-                if (!force && !isBidSession() && existingCount > 0 && now.isAfter(LocalTime.of(9, 32))) {
-                    return@withContext Result.success(existingCount)
-                }
 
                 val rawItems = EastmoneyBidDataSource.fetchAll()
                 if (rawItems.isEmpty()) {
                     return@withContext Result.failure(RuntimeException("未拉取到竞价数据"))
                 }
 
+                // 读取已有快照中的竞价数值，防止接口在盘中或盘后清空 f615
+                val existingMap = bidDao.getByDate(today).associateBy { it.code }
                 val savedAt = now.format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+
                 val entities = rawItems.map { item ->
-                    val result = BidStrategy.compute(item, config)
-                    item.toEntity(today, result, savedAt)
+                    val existing = existingMap[item.code]
+                    // 竞价涨幅保护：优先用接口实时的 f615；若接口为 0 且本地有早盘快照则继承
+                    val finalBidChange = if (item.bidChange != 0.0) {
+                        item.bidChange
+                    } else {
+                        existing?.bidChange ?: 0.0
+                    }
+                    val finalOpenPrice = if (item.openPrice > 0) {
+                        item.openPrice
+                    } else {
+                        existing?.openPrice ?: item.latestPrice
+                    }
+                    val mergedItem = item.copy(
+                        bidChange = finalBidChange,
+                        openPrice = finalOpenPrice
+                    )
+                    val result = BidStrategy.compute(mergedItem, config)
+                    mergedItem.toEntity(today, result, savedAt)
                 }
                 bidDao.insertAll(entities)
                 Result.success(entities.size)
