@@ -22,6 +22,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import android.widget.Toast
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -42,9 +44,9 @@ fun BidAnalysisScreen(
     viewModel: BidAnalysisViewModel = viewModel()
 ) {
     val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
 
     LaunchedEffect(Unit) {
-        // 进入只读 DB(不自动联网), 手动点"刷新"才拉接口
         viewModel.loadFiltered()
         viewModel.loadDates()
     }
@@ -59,6 +61,16 @@ fun BidAnalysisScreen(
                     }
                 },
                 actions = {
+                    TextButton(
+                        onClick = {
+                            viewModel.exportFilteredData(context) { _, msg ->
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        enabled = !state.loading && state.results.isNotEmpty()
+                    ) {
+                        Text("导出", color = Color.White, fontSize = 13.sp)
+                    }
                     TextButton(onClick = { viewModel.refresh() }, enabled = !state.loading) {
                         Text("刷新", color = Color.White, fontSize = 13.sp)
                     }
@@ -96,10 +108,21 @@ fun BidAnalysisScreen(
             if (!state.loading && state.results.isNotEmpty()) {
                 item {
                     Row(
-                        Modifier.fillMaxWidth().padding(12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text("共 ${state.results.size} 只", fontSize = 12.sp, color = Color.Gray)
+                        TextButton(
+                            onClick = {
+                                viewModel.exportFilteredData(context) { _, msg ->
+                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("📥 导出完整数据(CSV)", fontSize = 12.sp, color = Blue700, fontWeight = FontWeight.SemiBold)
+                        }
                     }
                 }
             }

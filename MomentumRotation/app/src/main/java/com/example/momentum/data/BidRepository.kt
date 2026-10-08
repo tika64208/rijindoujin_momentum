@@ -167,6 +167,20 @@ class BidRepository(
         }
 
     /**
+     * 获取当前筛选条件下的全部完整匹配结果(不截断, 用于完整数据导出)。
+     */
+    suspend fun getAllFilteredResults(
+        config: BidStrategy.BidConfig,
+        date: String = LocalDate.now().toString()
+    ): List<BidStrategy.BidResult> =
+        withContext(Dispatchers.IO) {
+            bidDao.getByDate(date)
+                .filter { applyFilter(it, config) }
+                .map { it.toBidResult() }
+                .sortedByDescending { it.probability }
+        }
+
+    /**
      * 多维条件实时筛选判断。
      */
     fun applyFilter(e: BidDataEntity, cfg: BidStrategy.BidConfig): Boolean {

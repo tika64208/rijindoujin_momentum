@@ -1,11 +1,13 @@
 package com.example.momentum.ui.screen
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.momentum.data.BidRepository
 import com.example.momentum.data.db.BidDataEntity
 import com.example.momentum.engine.BidStrategy
+import com.example.momentum.util.DataExporter
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -152,6 +154,30 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             val dates = repository.getAvailableDates()
             _state.update { it.copy(availableDates = dates) }
+        }
+    }
+
+    /**
+     * 导出当前筛选配置下的完整数据为 CSV 并唤起系统分享。
+     */
+    fun exportFilteredData(context: Context, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val fullResults = repository.getAllFilteredResults(_state.value.config)
+                if (fullResults.isEmpty()) {
+                    onResult(false, "当前筛选条件下无数据可导出")
+                    return@launch
+                }
+                val csv = DataExporter.generateBidCsv(fullResults)
+                val exportRes = DataExporter.exportAndShare(context, "竞价分析筛选结果", csv)
+                exportRes.onSuccess { name ->
+                    onResult(true, "已导出 ${fullResults.size} 只完整数据 ($name)")
+                }.onFailure { err ->
+                    onResult(false, "导出失败: ${err.message}")
+                }
+            } catch (e: Exception) {
+                onResult(false, "导出异常: ${e.message}")
+            }
         }
     }
 }
