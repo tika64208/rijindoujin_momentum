@@ -11,12 +11,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -27,6 +31,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.momentum.data.DataOrigin
 import com.example.momentum.model.Recommendation
 import com.example.momentum.model.Tier
+import com.example.momentum.ui.component.TabDocSheet
+import com.example.momentum.ui.component.TabDocs
 import com.example.momentum.ui.theme.*
 import kotlin.math.abs
 
@@ -40,6 +46,14 @@ fun MomentumScreen(
     onStockClick: (code: String, name: String) -> Unit = { _, _ -> }
 ) {
     val state by viewModel.state.collectAsState()
+    var showDocSheet by remember { mutableStateOf(false) }
+
+    if (showDocSheet) {
+        TabDocSheet(
+            data = TabDocs.WatchlistDoc,
+            onDismiss = { showDocSheet = false }
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -57,6 +71,13 @@ fun MomentumScreen(
                         enabled = !downloadState.running
                     ) {
                         Text(if (downloadState.running) "下载中…" else "下载日线", fontSize = 11.sp, color = Color.White)
+                    }
+                    IconButton(onClick = { showDocSheet = true }) {
+                        Icon(
+                            Icons.Filled.Info,
+                            contentDescription = "说明文档",
+                            tint = Color.White
+                        )
                     }
                     IconButton(onClick = onOpenSettings) {
                         Icon(

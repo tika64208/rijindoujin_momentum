@@ -55,6 +55,7 @@ import com.example.momentum.ui.screen.BidAnalysisScreen
 import com.example.momentum.ui.screen.DarkTradeListScreen
 import com.example.momentum.ui.screen.DownloadState
 import com.example.momentum.ui.screen.DownloadViewModel
+import com.example.momentum.ui.screen.ErrorLogScreen
 import com.example.momentum.ui.screen.MomentumScreen
 import com.example.momentum.ui.screen.MomentumViewModel
 import com.example.momentum.ui.screen.MyttScreen
@@ -74,7 +75,7 @@ private data class MainTab(
 private val mainTabs = listOf(
     MainTab("main/watchlist", "自选股", Icons.AutoMirrored.Filled.List),
     MainTab("main/darktrade", "全量暗盘", Icons.AutoMirrored.Filled.ShowChart),
-    MainTab("main/myatt", "MYTT选股", Icons.Filled.Search),
+    MainTab("main/myatt", "万龙选股", Icons.Filled.Search),
     MainTab("main/bid", "竞价分析", Icons.Filled.Star)
 )
 
@@ -195,19 +196,22 @@ private fun AppNavHost() {
             // 全量暗盘 tab
             composable(mainTabs[1].route) {
                 DarkTradeListScreen(
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    onStockClick = { code, name -> navController.navigate("detail/$code/$name") }
                 )
             }
             // MYTT 选股 tab
             composable(mainTabs[2].route) {
                 MyttScreen(
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    onStockClick = { code, name -> navController.navigate("detail/$code/$name") }
                 )
             }
             // 竞价分析 tab
             composable(mainTabs[3].route) {
                 BidAnalysisScreen(
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    onStockClick = { code, name -> navController.navigate("detail/$code/$name") }
                 )
             }
             // 股票详情(二级)
@@ -223,7 +227,8 @@ private fun AppNavHost() {
                 StockDetailScreen(
                     code = code,
                     name = name,
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    onOpenLogs = { navController.navigate("error_logs") }
                 )
             }
             // 设置(二级)
@@ -231,7 +236,14 @@ private fun AppNavHost() {
                 val viewModel: MomentumViewModel = viewModel()
                 SettingsScreen(
                     onBack = { navController.popBackStack() },
-                    viewModel = viewModel
+                    viewModel = viewModel,
+                    onOpenLogs = { navController.navigate("error_logs") }
+                )
+            }
+            // 错误与崩溃日志(二级)
+            composable("error_logs") {
+                ErrorLogScreen(
+                    onBack = { navController.popBackStack() }
                 )
             }
         }

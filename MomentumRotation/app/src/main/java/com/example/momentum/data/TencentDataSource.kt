@@ -318,7 +318,12 @@ object TencentDataSource {
 
             val code = conn.responseCode
             if (code != 200) {
-                throw RuntimeException("HTTP $code")
+                val extraHint = when (code) {
+                    501 -> " (触发腾讯网关WAF反爬验证重定向)"
+                    403 -> " (腾讯接口403防盗链/反爬)"
+                    else -> ""
+                }
+                throw RuntimeException("HTTP $code$extraHint [URL: $urlStr]")
             }
             val reader = BufferedReader(conn.inputStream.reader(charset))
             return reader.use { it.readText() }

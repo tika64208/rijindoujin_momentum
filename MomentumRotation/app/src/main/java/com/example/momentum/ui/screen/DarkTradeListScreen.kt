@@ -9,11 +9,9 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -22,6 +20,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.momentum.data.DarkTradeDataSource
+import com.example.momentum.ui.component.TabDocSheet
+import com.example.momentum.ui.component.TabDocs
 import com.example.momentum.ui.theme.*
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
@@ -36,15 +36,24 @@ private fun fmtYiAbs(v: Double): String = String.format("%.2f亿", kotlin.math.a
 @Composable
 fun DarkTradeListScreen(
     onBack: () -> Unit,
+    onStockClick: (code: String, name: String) -> Unit = { _, _ -> },
     viewModel: DarkTradeListViewModel = viewModel()
 ) {
     val state by viewModel.state.collectAsState()
     val listState = rememberLazyListState()
+    var showDocSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         if (state.records.isEmpty() && !state.loading) {
             viewModel.loadDate(state.date)
         }
+    }
+
+    if (showDocSheet) {
+        TabDocSheet(
+            data = TabDocs.DarkTradeDoc,
+            onDismiss = { showDocSheet = false }
+        )
     }
 
     Scaffold(
@@ -54,6 +63,15 @@ fun DarkTradeListScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showDocSheet = true }) {
+                        Icon(
+                            Icons.Filled.Info,
+                            contentDescription = "说明文档",
+                            tint = Color.White
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
@@ -120,7 +138,8 @@ fun DarkTradeListScreen(
                                 record = record,
                                 expanded = expanded,
                                 detail = if (expanded) state.detail else null,
-                                onClick = { viewModel.toggleExpand(record) }
+                                onClick = { viewModel.toggleExpand(record) },
+                                onStockClick = onStockClick
                             )
                         }
                     }
@@ -224,7 +243,8 @@ private fun TableRow(
     record: DarkTradeDataSource.DarkTradeRecord,
     expanded: Boolean,
     detail: StockDetailData?,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onStockClick: (code: String, name: String) -> Unit
 ) {
     Column(
         Modifier
@@ -238,7 +258,15 @@ private fun TableRow(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(record.code, fontSize = 12.sp, color = Color.DarkGray, modifier = Modifier.weight(1f))
-            Text(record.name.ifBlank { record.code }, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1.4f))
+            Text(
+                text = record.name.ifBlank { record.code },
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Blue700,
+                modifier = Modifier
+                    .weight(1.4f)
+                    .clickable { onStockClick(record.code, record.name.ifBlank { record.code }) }
+            )
             Text(fmtYiAbs(record.buyAmount), fontSize = 11.sp, color = Red600, modifier = Modifier.weight(1.2f))
             Text(fmtYiAbs(record.sellAmount), fontSize = 11.sp, color = Green600, modifier = Modifier.weight(1.2f))
             Text(fmtYi(record.netAmount), fontSize = 11.sp, fontWeight = FontWeight.Bold,
@@ -249,6 +277,19 @@ private fun TableRow(
         // 展开详情
         if (expanded) {
             DetailPanel(detail)
+            OutlinedButton(
+                onClick = { onStockClick(record.code, record.name.ifBlank { record.code }) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    "📈 查看 ${record.name.ifBlank { record.code }} 完整行情 (日线/分时/竞价/资金)",
+                    fontSize = 12.sp,
+                    color = Blue700,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
         }
     }
 }

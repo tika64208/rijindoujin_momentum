@@ -29,3 +29,4 @@ venv/
 # DSH 工作区文件(不应提交到项目仓库)
 .dsh/
 .dsh-filess/
+screenshot_*.png

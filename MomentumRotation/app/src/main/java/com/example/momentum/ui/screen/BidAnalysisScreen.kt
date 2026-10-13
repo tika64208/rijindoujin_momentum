@@ -1,20 +1,22 @@
 package com.example.momentum.ui.screen
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -29,6 +31,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.momentum.data.db.BidDataEntity
 import com.example.momentum.engine.BidStrategy
+import com.example.momentum.ui.component.TabDocSheet
+import com.example.momentum.ui.component.TabDocs
 import com.example.momentum.ui.theme.*
 import com.example.momentum.util.FinanceFormatter
 
@@ -41,14 +45,31 @@ private fun formatFilterVal(v: Double): String = FinanceFormatter.formatFilterNu
 @Composable
 fun BidAnalysisScreen(
     onBack: () -> Unit,
+    onStockClick: (code: String, name: String) -> Unit = { _, _ -> },
     viewModel: BidAnalysisViewModel = viewModel()
 ) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
+    var showBackupSheet by remember { mutableStateOf(false) }
+    var showDocSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         viewModel.loadFiltered()
         viewModel.loadDates()
+    }
+
+    if (showBackupSheet) {
+        DailyBackupSheet(
+            viewModel = viewModel,
+            onDismiss = { showBackupSheet = false }
+        )
+    }
+
+    if (showDocSheet) {
+        TabDocSheet(
+            data = TabDocs.BidDoc,
+            onDismiss = { showDocSheet = false }
+        )
     }
 
     Scaffold(
@@ -61,6 +82,16 @@ fun BidAnalysisScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { showDocSheet = true }) {
+                        Icon(
+                            Icons.Filled.Info,
+                            contentDescription = "说明文档",
+                            tint = Color.White
+                        )
+                    }
+                    TextButton(onClick = { showBackupSheet = true }) {
+                        Text("备份", color = Color.White, fontSize = 13.sp)
+                    }
                     TextButton(
                         onClick = {
                             viewModel.exportFilteredData(context) { _, msg ->
@@ -95,8 +126,21 @@ fun BidAnalysisScreen(
                 SearchCodeBar(
                     code = state.searchCode,
                     loading = state.searchLoading,
-                    onSearch = { viewModel.searchHistory(it) }
+                    onSearch = { viewModel.searchHistory(it) },
+                    onClear = { viewModel.searchHistory("") }
                 )
+            }
+            // 个股查询结果置顶卡片 (方案A: 紧随搜索框下方显示)
+            if (state.searchCode.isNotEmpty()) {
+                item {
+                    SearchResultCard(
+                        code = state.searchCode,
+                        loading = state.searchLoading,
+                        results = state.searchResults,
+                        onClose = { viewModel.searchHistory("") },
+                        onStockClick = onStockClick
+                    )
+                }
             }
             // 筛选参数面板
             item {
@@ -161,21 +205,8 @@ fun BidAnalysisScreen(
                     val display = state.displayResults
                     item { BidTableHeader(state, { viewModel.setSort(it) }) }
                     items(display, key = { it.item.code }) { result ->
-                        BidTableRow(result)
+                        BidTableRow(result, onStockClick = onStockClick)
                     }
-                }
-            }
-
-            // 历史查询结果
-            if (state.searchResults.isNotEmpty()) {
-                item {
-                    HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                    Text("📋 ${state.searchCode} 历史竞价(近30天)",
-                        fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Blue700,
-                        modifier = Modifier.padding(horizontal = 12.dp))
-                }
-                items(state.searchResults, key = { "${it.code}_${it.date}" }) { entity ->
-                    HistoryRow(entity)
                 }
             }
         }
@@ -418,8 +449,13 @@ private fun FilterPanel(config: BidStrategy.BidConfig, onConfigChange: (BidStrat
 }
 
 @Composable
-private fun SearchCodeBar(code: String, loading: Boolean, onSearch: (String) -> Unit) {
-    var text by remember { mutableStateOf(code) }
+private fun SearchCodeBar(
+    code: String,
+    loading: Boolean,
+    onSearch: (String) -> Unit,
+    onClear: () -> Unit
+) {
+    var text by remember(code) { mutableStateOf(code) }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -429,8 +465,18 @@ private fun SearchCodeBar(code: String, loading: Boolean, onSearch: (String) -> 
             value = text,
             onValueChange = { text = it },
             modifier = Modifier.weight(1f),
-            placeholder = { Text("输入代码查历史竞价…", fontSize = 13.sp, color = Color.Gray) },
+            placeholder = { Text("输入代码、名称或拼音查历史…", fontSize = 13.sp, color = Color.Gray) },
             singleLine = true,
+            trailingIcon = {
+                if (text.isNotEmpty()) {
+                    IconButton(onClick = {
+                        text = ""
+                        onClear()
+                    }) {
+                        Icon(Icons.Filled.Close, contentDescription = "清除", modifier = Modifier.size(18.dp), tint = Color.Gray)
+                    }
+                }
+            },
             shape = RoundedCornerShape(10.dp)
         )
         Button(
@@ -448,15 +494,145 @@ private fun SearchCodeBar(code: String, loading: Boolean, onSearch: (String) -> 
 }
 
 @Composable
-private fun HistoryRow(entity: BidDataEntity) {
+private fun SearchResultCard(
+    code: String,
+    loading: Boolean,
+    results: List<BidDataEntity>,
+    onClose: () -> Unit,
+    onStockClick: (code: String, name: String) -> Unit
+) {
+    if (code.isBlank()) return
+
+    val distinctCodes = remember(results) { results.map { it.code }.distinct() }
+    val titleText = remember(code, results, distinctCodes) {
+        if (results.isEmpty()) {
+            "📋 \"$code\" 历史竞价"
+        } else if (distinctCodes.size == 1) {
+            val first = results.first()
+            val nameDisplay = if (first.name.isNotBlank() && first.name != first.code) first.name else ""
+            if (nameDisplay.isNotEmpty()) "📋 $nameDisplay (${first.code}) 历史竞价" else "📋 ${first.code} 历史竞价"
+        } else {
+            "📋 \"$code\" 匹配到 ${distinctCodes.size} 只股票历史"
+        }
+    }
+
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF0F7FF)),
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, Color(0xFFBFDBFE))
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = titleText,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Blue700
+                    )
+                    if (results.isNotEmpty()) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "(共${results.size}条)",
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                }
+                IconButton(onClick = onClose, modifier = Modifier.size(24.dp)) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "关闭",
+                        tint = Color.Gray,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            when {
+                loading -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Blue700)
+                        Spacer(Modifier.width(8.dp))
+                        Text("正在查询历史竞价…", fontSize = 12.sp, color = Color.Gray)
+                    }
+                }
+                results.isEmpty() -> {
+                    Text(
+                        text = "暂无匹配的历史竞价数据 (支持输入代码、中文名称如\"茅台\"或拼音缩写)",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
+                }
+                else -> {
+                    var expandedAll by remember { mutableStateOf(false) }
+                    val displayList = if (expandedAll) results else results.take(5)
+                    val showStockInfo = distinctCodes.size > 1
+
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        displayList.forEach { entity ->
+                            HistoryRow(entity, showStockInfo = showStockInfo, onStockClick = onStockClick)
+                        }
+                    }
+
+                    if (results.size > 5) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            TextButton(
+                                onClick = { expandedAll = !expandedAll },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Text(
+                                    text = if (expandedAll) "收起" else "查看更多 (共 ${results.size} 条记录) ▼",
+                                    fontSize = 12.sp,
+                                    color = Blue700,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryRow(
+    entity: BidDataEntity,
+    showStockInfo: Boolean = false,
+    onStockClick: ((code: String, name: String) -> Unit)? = null
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onStockClick != null) Modifier.clickable { onStockClick(entity.code, entity.name) } else Modifier),
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White)
     ) {
         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (showStockInfo && entity.name.isNotBlank()) {
+                        Text(entity.name, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Blue700)
+                        Spacer(Modifier.width(6.dp))
+                    }
                     Text(entity.date.takeLast(5), fontSize = 12.sp, color = Color.Gray)
                     Spacer(Modifier.width(8.dp))
                     Text(formatPrice(entity.latestPrice), fontSize = 14.sp, fontWeight = FontWeight.Bold)
@@ -467,6 +643,10 @@ private fun HistoryRow(entity: BidDataEntity) {
                     Text("竞价${formatPct(entity.bidChange)}", fontSize = 12.sp, color = Color(0xFF7C3AED))
                 }
                 Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (showStockInfo) {
+                        Text(entity.code, fontSize = 11.sp, color = Color.Gray)
+                        Spacer(Modifier.width(8.dp))
+                    }
                     Text("市值${formatMv(entity.circMv)}", fontSize = 11.sp, color = Color.Gray)
                     Spacer(Modifier.width(10.dp))
                     Text("可信度${entity.confidence}", fontSize = 11.sp, color = Color.Gray)
@@ -511,19 +691,33 @@ private fun HeaderCellBid(label: String, field: BidSortField, state: BidAnalysis
 }
 
 @Composable
-private fun BidTableRow(result: BidStrategy.BidResult) {
+private fun BidTableRow(
+    result: BidStrategy.BidResult,
+    onStockClick: (code: String, name: String) -> Unit = { _, _ -> }
+) {
     val s = result.item
     Row(
         Modifier.fillMaxWidth()
             .background(Color.White, RoundedCornerShape(6.dp))
+            .clickable { onStockClick(s.code, s.name) }
             .padding(horizontal = 6.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // 名称 + 代码
-        Column(Modifier.weight(1.3f)) {
+        // 名称 + 代码 (点击均可进入详情)
+        Column(
+            Modifier
+                .weight(1.3f)
+                .clickable { onStockClick(s.code, s.name) }
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(s.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    text = s.name,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Blue700,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
                 if (result.warnText != "-") {
                     Text(result.warnText, fontSize = 9.sp, color = Red600,
                         modifier = Modifier.padding(start = 1.dp))
@@ -561,5 +755,113 @@ private fun PctBar(text: String, value: Double, positiveColor: Color, negativeCo
         )
         Text(text, fontSize = 11.sp, color = barColor, fontWeight = FontWeight.SemiBold,
             modifier = Modifier.padding(start = 2.dp))
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DailyBackupSheet(
+    viewModel: BidAnalysisViewModel,
+    onDismiss: () -> Unit
+) {
+    val backupFiles by viewModel.backupFiles.collectAsState()
+    val context = LocalContext.current
+    var isBackingUp by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        viewModel.loadBackupFiles()
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("📁 每日全量数据备份", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Blue700)
+                TextButton(onClick = onDismiss) { Text("完成") }
+            }
+            Text(
+                "公共存储路径: Download/MomentumRotation/daily_backup/",
+                fontSize = 11.sp, color = Color.Gray,
+                modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
+            )
+
+            Button(
+                onClick = {
+                    isBackingUp = true
+                    viewModel.backupTodayData { _, msg ->
+                        isBackingUp = false
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isBackingUp,
+                colors = ButtonDefaults.buttonColors(containerColor = Blue700),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                if (isBackingUp) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text("💾 立即备份今日全量数据(CSV)", fontSize = 13.sp)
+            }
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(8.dp))
+
+            Text("历史备份文件 (${backupFiles.size})", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.DarkGray)
+            Spacer(Modifier.height(6.dp))
+
+            if (backupFiles.isEmpty()) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(140.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("暂无本地备份文件，点击上方按钮即可生成", fontSize = 12.sp, color = Color.Gray)
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 350.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(backupFiles, key = { it.name }) { info ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFFF9FAFB)),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text(info.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                    Text("大小: ${info.formattedSize}  ·  日期: ${info.date}", fontSize = 10.sp, color = Color.Gray)
+                                }
+                                IconButton(onClick = { viewModel.shareBackup(info.file) }) {
+                                    Text("📤", fontSize = 14.sp)
+                                }
+                                IconButton(onClick = { viewModel.deleteBackup(info) }) {
+                                    Text("🗑️", fontSize = 14.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
     }
 }

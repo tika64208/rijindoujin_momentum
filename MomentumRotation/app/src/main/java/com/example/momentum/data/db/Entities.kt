@@ -82,3 +82,17 @@ data class BidDataEntity(
     val excluded: Boolean = false,
     val excludeReason: String = ""
 )
+
+/**
+ * 万龙选股(万手单 AND 寻龙诀4号 双共振)结果实体，永久存 DB。
+ */
+@Entity(tableName = "wanlong_hits", primaryKeys = ["code", "date"])
+data class WanlongHitEntity(
+    val code: String,          // 6 位股票代码
+    val date: String,          // 信号日期 yyyy-MM-dd
+    val name: String,          // 股票名称
+    val close: Double,         // 当日收盘价
+    val chgPct: Double = 0.0,  // 当日涨幅%
+    val xlj4_7: Double = 0.0,  // 距前次寻龙诀周期
+    val savedAt: String = ""   // 保存时间戳
+)

@@ -8,14 +8,15 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [DailyBarEntity::class, CacheMetaEntity::class, BidDataEntity::class, DarkTradeDataEntity::class],
-    version = 5,
+    entities = [DailyBarEntity::class, CacheMetaEntity::class, BidDataEntity::class, DarkTradeDataEntity::class, WanlongHitEntity::class],
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun dailyBarDao(): DailyBarDao
     abstract fun bidDao(): BidDao
     abstract fun darkTradeDao(): DarkTradeDao
+    abstract fun wanlongDao(): WanlongDao
 
     companion object {
         @Volatile
@@ -83,6 +84,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v5 -> v6: 新增 wanlong_hits 表 (万龙选股历史结果持久化)。 */
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS wanlong_hits (" +
+                        "code TEXT NOT NULL, date TEXT NOT NULL, name TEXT NOT NULL, " +
+                        "close REAL NOT NULL, chgPct REAL NOT NULL DEFAULT 0.0, " +
+                        "xlj4_7 REAL NOT NULL DEFAULT 0.0, savedAt TEXT NOT NULL DEFAULT '', " +
+                        "PRIMARY KEY(code, date))"
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -94,7 +108,8 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_1_2,
                         MIGRATION_2_3,
                         MIGRATION_3_4,
-                        MIGRATION_4_5
+                        MIGRATION_4_5,
+                        MIGRATION_5_6
                     )
                     .build().also { INSTANCE = it }
             }

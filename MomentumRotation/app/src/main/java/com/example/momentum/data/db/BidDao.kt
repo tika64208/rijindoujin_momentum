@@ -24,6 +24,10 @@ interface BidDao {
     @Query("SELECT * FROM bid_data WHERE code = :code ORDER BY date DESC LIMIT :limit")
     suspend fun getHistory(code: String, limit: Int = 30): List<BidDataEntity>
 
+    /** 支持按代码精确/模糊或名称模糊查询近 N 天竞价数据 */
+    @Query("SELECT * FROM bid_data WHERE code = :query OR name = :query OR name LIKE '%' || :query || '%' OR code LIKE '%' || :query || '%' ORDER BY date DESC LIMIT :limit")
+    suspend fun searchHistory(query: String, limit: Int = 50): List<BidDataEntity>
+
     /** 某天是否有已保存数据 */
     @Query("SELECT COUNT(*) FROM bid_data WHERE date = :date")
     suspend fun countByDate(date: String): Int

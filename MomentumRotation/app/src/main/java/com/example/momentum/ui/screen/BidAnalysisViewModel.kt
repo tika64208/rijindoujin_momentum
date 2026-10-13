@@ -7,7 +7,10 @@ import androidx.lifecycle.viewModelScope
 import com.example.momentum.data.BidRepository
 import com.example.momentum.data.db.BidDataEntity
 import com.example.momentum.engine.BidStrategy
+import com.example.momentum.util.BackupFileInfo
+import com.example.momentum.util.DailyBackupManager
 import com.example.momentum.util.DataExporter
+import java.io.File
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -65,8 +68,52 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
 
     private var job: Job? = null
 
+    private val _backupFiles = MutableStateFlow<List<BackupFileInfo>>(emptyList())
+    val backupFiles: StateFlow<List<BackupFileInfo>> = _backupFiles
+
     init {
         _state.update { it.copy(config = repository.loadConfig()) }
+        loadBackupFiles()
+    }
+
+    /**
+     * 读取本地所有每日备份文件。
+     */
+    fun loadBackupFiles() {
+        viewModelScope.launch {
+            val files = DailyBackupManager.listBackupFiles(getApplication())
+            _backupFiles.value = files
+        }
+    }
+
+    /**
+     * 手动触发今日全量竞价数据备份。
+     */
+    fun backupTodayData(onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            val res = DailyBackupManager.backupTodayBidData(getApplication())
+            res.onSuccess { info ->
+                loadBackupFiles()
+                onResult(true, "已成功备份今日全量数据: ${info.name}")
+            }.onFailure { err ->
+                onResult(false, "备份失败: ${err.message}")
+            }
+        }
+    }
+
+    /**
+     * 发送分享指定的备份文件。
+     */
+    fun shareBackup(file: File) {
+        DailyBackupManager.shareBackupFile(getApplication(), file)
+    }
+
+    /**
+     * 删除指定的备份文件。
+     */
+    fun deleteBackup(info: BackupFileInfo) {
+        DailyBackupManager.deleteBackupFile(getApplication(), info)
+        loadBackupFiles()
     }
 
     fun isBidSession(): Boolean = repository.isBidSession()

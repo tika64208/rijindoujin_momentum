@@ -7,6 +7,7 @@ import com.example.momentum.data.db.BidDataEntity
 import com.example.momentum.data.db.toBidResult
 import com.example.momentum.data.db.toEntity
 import com.example.momentum.engine.BidStrategy
+import com.example.momentum.util.DailyBackupManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.time.DayOfWeek
@@ -26,7 +27,8 @@ import java.time.format.DateTimeFormatter
  */
 class BidRepository(
     private val database: AppDatabase,
-    private val prefs: SharedPreferences
+    private val prefs: SharedPreferences,
+    private val appContext: Context? = null
 ) {
     private val bidDao get() = database.bidDao()
 
@@ -144,6 +146,14 @@ class BidRepository(
                     mergedItem.toEntity(today, result, savedAt)
                 }
                 bidDao.insertAll(entities)
+
+                // 自动每日备份至本地 CSV 文件
+                appContext?.let { ctx ->
+                    try {
+                        DailyBackupManager.backupTodayBidData(ctx, today)
+                    } catch (_: Exception) {}
+                }
+
                 Result.success(entities.size)
             } catch (e: Exception) {
                 Result.failure(e)
@@ -219,11 +229,34 @@ class BidRepository(
     }
 
     /**
-     * 查询个股最近 30 天历史竞价记录。
+     * 查询个股最近历史竞价记录。
+     * 支持：股票代码(如 600519)、中文名称(如 贵州茅台 / 茅台)、或拼音缩写(如 gzmt)。
      */
-    suspend fun searchHistory(code: String, limit: Int = 30): List<BidDataEntity> =
+    suspend fun searchHistory(query: String, limit: Int = 50): List<BidDataEntity> =
         withContext(Dispatchers.IO) {
-            bidDao.getHistory(code, limit)
+            val clean = query.trim()
+            if (clean.isEmpty()) return@withContext emptyList()
+
+            // 1. 本地 DB 查询 (支持代码或中文名称模糊匹配)
+            val localList = bidDao.searchHistory(clean, limit)
+            if (localList.isNotEmpty()) {
+                return@withContext localList
+            }
+
+            // 2. 本地未命中时，尝试调用腾讯股票搜索服务解析中文或拼音(如 "gzmt" -> 600519)
+            try {
+                val candidates = TencentDataSource.searchStocks(clean)
+                for (c in candidates) {
+                    val hit = bidDao.getHistory(c.code, limit)
+                    if (hit.isNotEmpty()) {
+                        return@withContext hit
+                    }
+                }
+            } catch (e: Exception) {
+                // 忽略解析网络异常
+            }
+
+            emptyList()
         }
 
     /**
@@ -238,7 +271,7 @@ class BidRepository(
         fun create(context: Context): BidRepository {
             val db = AppDatabase.get(context)
             val prefs = context.getSharedPreferences("bid_config", Context.MODE_PRIVATE)
-            return BidRepository(db, prefs)
+            return BidRepository(db, prefs, context.applicationContext)
         }
     }
 }

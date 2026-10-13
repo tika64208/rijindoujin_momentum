@@ -19,16 +19,22 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.momentum.data.AStockDataSource
 import com.example.momentum.data.DarkTradeDataSource
 import com.example.momentum.data.MoneyFlowDataSource
 import com.example.momentum.data.TencentDataSource
+import com.example.momentum.data.db.AppDatabase
+import com.example.momentum.data.db.BidDataEntity
 import com.example.momentum.engine.MacdEngine
 import com.example.momentum.model.DailyBar
 import com.example.momentum.model.Stock
 import com.example.momentum.ui.theme.*
+import com.example.momentum.util.CrashLogManager
+import com.example.momentum.util.FinanceFormatter
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -40,8 +46,10 @@ import kotlin.math.roundToInt
 fun StockDetailScreen(
     code: String,
     name: String,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onOpenLogs: (() -> Unit)? = null
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val symbol = remember(code) { Stock.toMarketPrefix(code) }
     val (benchSymbol, benchName) = remember(code) { TencentDataSource.getBenchmarkIndex(code) }
@@ -54,53 +62,142 @@ fun StockDetailScreen(
     var darkLoading by remember { mutableStateOf(true) }
     var moneyFlows by remember { mutableStateOf<List<MoneyFlowDataSource.FlowPoint>>(emptyList()) }
     var flowLoading by remember { mutableStateOf(true) }
+    var bidHistory by remember { mutableStateOf<List<BidDataEntity>>(emptyList()) }
+    var bidLoading by remember { mutableStateOf(true) }
     var dailyBars by remember { mutableStateOf<List<DailyBar>>(emptyList()) }
     var showKLine by remember { mutableStateOf(false) }  // false=分时, true=日K
     var loading by remember { mutableStateOf(true) }
+    var errorNotice by remember { mutableStateOf<String?>(null) }
+    var refreshTrigger by remember { mutableStateOf(0) }
 
-    LaunchedEffect(code) {
+    LaunchedEffect(code, refreshTrigger) {
         loading = true
+        errorNotice = null
         scope.launch {
-            val stock = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                TencentDataSource.fetchMinuteData(symbol)
+            try {
+                val stock = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        TencentDataSource.fetchMinuteData(symbol)
+                    } catch (e: Exception) {
+                        CrashLogManager.recordError("StockDetailScreen", "个股分时加载失败($symbol): ${e.message}", e)
+                        emptyList()
+                    }
+                }
+                stockData = stock
+
+                // 下半部分: 板块/行业指数分时(腾讯接口, CSSW电子等)
+                val bench = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        TencentDataSource.fetchMinuteData(benchSymbol)
+                    } catch (e: Exception) {
+                        CrashLogManager.recordError("StockDetailScreen", "板块分时加载失败($benchSymbol): ${e.message}", e)
+                        emptyList()
+                    }
+                }
+                boardData = bench
+
+                // 个股 MACD: 优先腾讯日线，遇到501/WAF或网络异常时自动降级至东方财富日线备用源
+                val bars = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        TencentDataSource.fetchDailyBars(symbol, 252)
+                    } catch (e: Exception) {
+                        CrashLogManager.recordError(
+                            "StockDetailScreen",
+                            "腾讯日K接口获取失败($symbol): ${e.message}，自动尝试东财备用源",
+                            e
+                        )
+                        try {
+                            // 降级东方财富日线
+                            val fallbackBars = AStockDataSource.fetchDailyBars(code, "20240101")
+                            if (fallbackBars.isEmpty()) {
+                                errorNotice = "部分日K数据加载受限 (已记录错误日志)"
+                            }
+                            fallbackBars
+                        } catch (e2: Exception) {
+                            CrashLogManager.recordError(
+                                "StockDetailScreen",
+                                "东财备用日K源也失败($code): ${e2.message}",
+                                e2
+                            )
+                            errorNotice = "日K数据加载失败: ${e.message?.take(30)}"
+                            emptyList()
+                        }
+                    }
+                }
+                dailyBars = bars
+                macdData = MacdEngine.compute(bars)
+
+                // 板块 MACD: 用指数日线数据计算(近一年)
+                val boardBars = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    try {
+                        TencentDataSource.fetchDailyBars(benchSymbol, 252)
+                    } catch (e: Exception) {
+                        CrashLogManager.recordError(
+                            "StockDetailScreen",
+                            "板块日K接口获取失败($benchSymbol): ${e.message}",
+                            e
+                        )
+                        emptyList()
+                    }
+                }
+                boardMacdData = MacdEngine.compute(boardBars)
+            } catch (t: Throwable) {
+                CrashLogManager.recordError(
+                    "StockDetailScreen",
+                    "详情页加载异常: ${t.message}",
+                    t
+                )
+                errorNotice = "加载出错: ${t.message?.take(40)}"
+            } finally {
+                loading = false
             }
-            stockData = stock
-            // 下半部分: 板块/行业指数分时(腾讯接口, CSSW电子等)
-            val bench = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                TencentDataSource.fetchMinuteData(benchSymbol)
-            }
-            boardData = bench
-            // 个股 MACD: 用日线数据计算(近一年)
-            val bars = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                TencentDataSource.fetchDailyBars(symbol, 252)
-            }
-            dailyBars = bars
-            macdData = MacdEngine.compute(bars)
-            // 板块 MACD: 用指数日线数据计算(近一年)
-            val boardBars = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                TencentDataSource.fetchDailyBars(benchSymbol, 252)
-            }
-            boardMacdData = MacdEngine.compute(boardBars)
-            loading = false
         }
+
         // 暗盘数据(近10日, 无数据日补零)
         scope.launch {
             darkLoading = true
-            val records = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                DarkTradeDataSource.fetchRecent10Days(code)
+            try {
+                val records = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    DarkTradeDataSource.fetchRecent10Days(code)
+                }
+                darkTrades = records
+            } catch (e: Exception) {
+                CrashLogManager.recordError("StockDetailScreen", "暗盘数据加载失败($code): ${e.message}", e)
+            } finally {
+                darkLoading = false
             }
-            darkTrades = records
-            darkLoading = false
         }
+
         // 主力资金独立异步加载(单次请求, 限流防反爬)
         scope.launch {
             kotlinx.coroutines.delay(800)  // 稍延迟, 避免与暗盘并发触发东财反爬
             flowLoading = true
-            val flows = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                MoneyFlowDataSource.fetchFlow(code, 30)
+            try {
+                val flows = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    MoneyFlowDataSource.fetchFlow(code, 30)
+                }
+                moneyFlows = flows
+            } catch (e: Exception) {
+                CrashLogManager.recordError("StockDetailScreen", "主力资金加载失败($code): ${e.message}", e)
+            } finally {
+                flowLoading = false
             }
-            moneyFlows = flows
-            flowLoading = false
+        }
+
+        // 竞价历史数据异步加载
+        scope.launch {
+            bidLoading = true
+            try {
+                val db = AppDatabase.get(context)
+                val history = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    db.bidDao().getHistory(code, 30)
+                }
+                bidHistory = history
+            } catch (e: Exception) {
+                CrashLogManager.recordError("StockDetailScreen", "竞价数据加载失败($code): ${e.message}", e)
+            } finally {
+                bidLoading = false
+            }
         }
     }
 
@@ -133,6 +230,35 @@ fun StockDetailScreen(
                     .padding(horizontal = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                // 异常提示横幅 (若接口失败或降级)
+                if (errorNotice != null) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFEF2F2)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = errorNotice ?: "",
+                                color = Color(0xFFDC2626),
+                                fontSize = 12.sp,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (onOpenLogs != null) {
+                                TextButton(onClick = onOpenLogs) {
+                                    Text("查看日志", fontSize = 12.sp, color = Color(0xFFDC2626), fontWeight = FontWeight.Bold)
+                                }
+                            }
+                            TextButton(onClick = { refreshTrigger++ }) {
+                                Text("重试", fontSize = 12.sp, color = Blue700)
+                            }
+                        }
+                    }
+                }
+
                 // 个股图表区(分时/日K可切换)
                 if (showKLine) {
                     KLineChart(
@@ -199,6 +325,13 @@ fun StockDetailScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
+
+                // 集合竞价分析与胜率卡片
+                BidDetailCard(
+                    bidHistory = bidHistory,
+                    loading = bidLoading,
+                    modifier = Modifier.fillMaxWidth()
+                )
 
                 Spacer(Modifier.height(12.dp))
             }
@@ -369,5 +502,129 @@ private fun VolumeChart(points: List<TencentDataSource.MinutePoint>, modifier: M
             points[n - 1].time, w - padRight, h - 1.dp.toPx(),
             Paint().apply { color = android.graphics.Color.GRAY; textSize = 8.sp.toPx(); textAlign = Paint.Align.RIGHT }
         )
+    }
+}
+
+@Composable
+private fun BidDetailCard(
+    bidHistory: List<BidDataEntity>,
+    loading: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White)
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("📊 集合竞价分析与胜率", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Blue700)
+                if (bidHistory.isNotEmpty()) {
+                    Text("近${bidHistory.size}天记录", fontSize = 11.sp, color = Color.Gray)
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            when {
+                loading -> {
+                    Text("正在加载竞价数据…", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(vertical = 8.dp))
+                }
+                bidHistory.isEmpty() -> {
+                    Text("暂无近期集合竞价盘口记录 (交易日 09:25 开盘自动捕获全市场竞价快照)", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(vertical = 8.dp))
+                }
+                else -> {
+                    val latest = bidHistory.first()
+                    // 最新一笔竞价摘要看板
+                    Surface(
+                        color = Color(0xFFF8FAFC),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(Modifier.padding(10.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column {
+                                    Text("最近竞价日: ${latest.date}", fontSize = 11.sp, color = Color.Gray)
+                                    Spacer(Modifier.height(2.dp))
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = FinanceFormatter.formatPct(latest.bidChange),
+                                            fontSize = 18.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (latest.bidChange >= 0) Red600 else Green600
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = "开盘 ${FinanceFormatter.formatPrice(latest.openPrice)}",
+                                            fontSize = 12.sp,
+                                            color = Color.DarkGray
+                                        )
+                                    }
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text("预测胜率", fontSize = 11.sp, color = Color.Gray)
+                                        Text(
+                                            text = "${latest.probability}%",
+                                            fontSize = 16.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (latest.probability >= 70) Red600 else Amber600
+                                        )
+                                    }
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text("综合评分", fontSize = 11.sp, color = Color.Gray)
+                                        Text(
+                                            text = "${latest.score}",
+                                            fontSize = 16.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Blue700
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text("竞价换手: ${String.format("%.2f%%", latest.bidTurnover)}", fontSize = 11.sp, color = Color(0xFF475569))
+                                Text("实体预期: ${FinanceFormatter.formatPct(latest.entityChange)}", fontSize = 11.sp, color = Color(0xFF475569))
+                                Text("可信度: ${latest.confidence}", fontSize = 11.sp, color = Color(0xFF475569))
+                            }
+                        }
+                    }
+
+                    // 历史竞价列表 (展示最近 5 天)
+                    if (bidHistory.size > 1) {
+                        Spacer(Modifier.height(10.dp))
+                        Text("历史竞价与收盘对照", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color.DarkGray)
+                        Spacer(Modifier.height(4.dp))
+                        bidHistory.take(5).forEach { item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(item.date.takeLast(5), fontSize = 11.sp, color = Color.Gray)
+                                Text("竞价 ${FinanceFormatter.formatPct(item.bidChange)}", fontSize = 11.sp, color = if (item.bidChange >= 0) Red600 else Green600)
+                                Text("收盘 ${FinanceFormatter.formatPct(item.realChange)}", fontSize = 11.sp, color = if (item.realChange >= 0) Red600 else Green600)
+                                Text("胜率 ${item.probability}%", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = if (item.probability >= 70) Red600 else Color.DarkGray)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -1,11 +1,14 @@
 package com.example.momentum.ui.screen
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -23,12 +26,14 @@ import androidx.compose.ui.unit.sp
 import com.example.momentum.data.RebalancePeriod
 import com.example.momentum.data.Settings
 import com.example.momentum.ui.theme.*
+import com.example.momentum.util.CrashLogManager
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     onBack: () -> Unit,
-    viewModel: MomentumViewModel
+    viewModel: MomentumViewModel,
+    onOpenLogs: (() -> Unit)? = null
 ) {
     val settings by viewModel.settings.collectAsState()
     val context = LocalContext.current
@@ -141,6 +146,60 @@ fun SettingsScreen(
                         checked = monitorEnabled,
                         onCheckedChange = onMonitorToggle,
                         colors = SwitchDefaults.colors(checkedTrackColor = Green600)
+                    )
+                }
+            }
+
+            // 错误与崩溃日志入口
+            val logs = remember { CrashLogManager.getLogs() }
+            val crashCount = remember(logs) { logs.count { it.type == "CRASH" } }
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onOpenLogs?.invoke() },
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = Color.White)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Filled.BugReport,
+                        contentDescription = null,
+                        tint = if (crashCount > 0) Red600 else Blue700,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("错误与崩溃日志", fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                            if (crashCount > 0) {
+                                Spacer(Modifier.width(6.dp))
+                                Surface(
+                                    color = Red600,
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Text(
+                                        "$crashCount 次崩溃",
+                                        color = Color.White,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Text(
+                            if (logs.isEmpty()) "暂无异常记录" else "共 ${logs.size} 条记录，点击查看详情与调用栈",
+                            fontSize = 12.sp, color = Color.Gray
+                        )
+                    }
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowForwardIos,
+                        contentDescription = null,
+                        tint = Color.LightGray,
+                        modifier = Modifier.size(16.dp)
                     )
                 }
             }
