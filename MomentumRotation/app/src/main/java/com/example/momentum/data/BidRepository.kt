@@ -171,7 +171,12 @@ class BidRepository(
                             bidChange = finalBidChange,
                             openPrice = finalOpenPrice
                         )
-                        val result = BidStrategy.compute(mergedItem, config)
+                        // 关键修复：计算竞价模型评分时，必须以开盘竞价涨幅为基准，绝不能使用盘中实时波动率污染评分！
+                        val computeItem = mergedItem.copy(
+                            realChange = finalBidChange,
+                            latestPrice = finalOpenPrice
+                        )
+                        val result = BidStrategy.compute(computeItem, config)
                         mergedItem.toEntity(today, result, savedAt)
                     }
                 }
@@ -199,7 +204,8 @@ class BidRepository(
     ): Pair<List<BidStrategy.BidResult>, String> =
         withContext(Dispatchers.IO) {
             val entities = bidDao.getByDate(date)
-            val filtered = entities.filter { applyFilter(it, config) }
+            val sanitized = entities.map { sanitizeEntity(it, config) }
+            val filtered = sanitized.filter { applyFilter(it, config) }
                 .map { it.toBidResult() }
                 .sortedByDescending { it.probability }
             val savedAt = entities.firstOrNull()?.savedAt ?: ""
@@ -211,16 +217,46 @@ class BidRepository(
      */
     suspend fun getLockedResults(
         lockedCodes: Set<String>,
-        date: String = LocalDate.now().toString()
+        date: String = LocalDate.now().toString(),
+        config: BidStrategy.BidConfig = BidStrategy.BidConfig.DEFAULT
     ): Pair<List<BidStrategy.BidResult>, String> =
         withContext(Dispatchers.IO) {
             val entities = bidDao.getByDate(date)
-            val filtered = entities.filter { it.code in lockedCodes }
+            val sanitized = entities.map { sanitizeEntity(it, config) }
+            val filtered = sanitized.filter { it.code in lockedCodes }
                 .map { it.toBidResult() }
                 .sortedByDescending { it.probability }
             val savedAt = entities.firstOrNull()?.savedAt ?: ""
             filtered to savedAt
         }
+
+    /**
+     * 对实体进行竞价纯净性校准：确保评分和概率完全由早盘竞价数据决定，不受盘中股价波动污染。
+     */
+    private fun sanitizeEntity(e: BidDataEntity, config: BidStrategy.BidConfig): BidDataEntity {
+        val basePrice = if (e.openPrice > 0) e.openPrice else e.latestPrice
+        val rawItem = BidStrategy.BidItem(
+            code = e.code,
+            name = e.name,
+            latestPrice = basePrice,
+            realChange = e.bidChange, // 严格以竞价涨幅为基准
+            openPrice = e.openPrice,
+            volume = e.volume,
+            amount = e.amount,
+            turnover = e.turnover,
+            circMv = e.circMv,
+            bidChange = e.bidChange,
+            warnFlag = e.warnFlag,
+            industry = e.industry,
+            conceptQuick = e.conceptQuick
+        )
+        val res = BidStrategy.compute(rawItem, config)
+        return e.copy(
+            probability = res.probability,
+            confidence = res.confidence,
+            score = res.score
+        )
+    }
 
     /**
      * 持久化锁定的股票池代码
@@ -251,8 +287,9 @@ class BidRepository(
         date: String = LocalDate.now().toString()
     ): List<BidStrategy.BidResult> =
         withContext(Dispatchers.IO) {
-            bidDao.getByDate(date)
-                .filter { applyFilter(it, config) }
+            val entities = bidDao.getByDate(date)
+            val sanitized = entities.map { sanitizeEntity(it, config) }
+            sanitized.filter { applyFilter(it, config) }
                 .map { it.toBidResult() }
                 .sortedByDescending { it.probability }
         }
@@ -262,8 +299,9 @@ class BidRepository(
      */
     suspend fun getHighWinRateCandidates(date: String = LocalDate.now().toString()): List<BidDataEntity> =
         withContext(Dispatchers.IO) {
-            bidDao.getByDate(date)
-                .filter { applyFilter(it, BidStrategy.BidConfig.HIGH_WIN_RATE) }
+            val entities = bidDao.getByDate(date)
+            val sanitized = entities.map { sanitizeEntity(it, BidStrategy.BidConfig.HIGH_WIN_RATE) }
+            sanitized.filter { applyFilter(it, BidStrategy.BidConfig.HIGH_WIN_RATE) }
         }
 
     /**

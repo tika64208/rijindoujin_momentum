@@ -153,7 +153,7 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch {
             val current = _state.value
             val (results, savedAt) = if (current.isPoolLocked && current.lockedCodes.isNotEmpty()) {
-                repository.getLockedResults(current.lockedCodes)
+                repository.getLockedResults(current.lockedCodes, config = current.config)
             } else {
                 repository.getFilteredResults(current.config)
             }

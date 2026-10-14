@@ -124,7 +124,7 @@ object BidStrategy {
         val bidTurnover = computeBidTurnover(item)
         val warnType = item.warnFlag
         val circMvYi = item.circMv / 100_000_000.0  // circMv 是总市值(元)，转亿
-        val yesterday = item.realChange
+        val baseChange = if (item.bidChange != 0.0) item.bidChange else item.realChange
 
         // 因子1: 竞价涨幅(权重34%)
         val bidScore = when {
@@ -158,17 +158,17 @@ object BidStrategy {
             circMvYi < 250 -> 0.45
             else -> 0.22
         }
-        // 因子5: 昨日涨幅(权重6%)
-        val yesterdayScore = when {
-            yesterday >= 3.0 && yesterday < 9.5 -> 0.9
-            yesterday >= 1.0 -> 0.65
-            yesterday >= 0 -> 0.4
-            yesterday > -3.0 -> 0.25
+        // 因子5: 盘口动量(权重6%)
+        val momentumScore = when {
+            baseChange >= 3.0 && baseChange < 9.5 -> 0.9
+            baseChange >= 1.0 -> 0.65
+            baseChange >= 0 -> 0.4
+            baseChange > -3.0 -> 0.25
             else -> 0.15
         }
 
         val base = bidScore * 0.34 + activityScore * 0.32 + warnScore * 0.17 +
-                   marketScore * 0.11 + yesterdayScore * 0.06
+                   marketScore * 0.11 + momentumScore * 0.06
         val prob = max(5, min(95, (base * 100).roundToInt()))
 
         var conf = 65
@@ -180,10 +180,11 @@ object BidStrategy {
         return Pair(prob, conf)
     }
 
-    // ===== V2 评分 =====
+    // ===== V2 评分 (以竞价开盘涨幅为基准，不受盘中股价波动污染) =====
     fun computeV2Score(item: BidItem, bidVolume: Int): Int {
+        val changeForScore = if (item.bidChange != 0.0) item.bidChange else item.realChange
         val bidScore = max(0.0, min(item.bidChange / 9.0, 1.0)) * 50
-        val realScore = max(0.0, min(item.realChange / 10.0, 1.0)) * 20
+        val realScore = max(0.0, min(changeForScore / 10.0, 1.0)) * 20
         val warnScore = when {
             item.warnFlag == 5 -> 20
             item.warnFlag == 4 -> 16
