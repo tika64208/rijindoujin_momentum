@@ -105,9 +105,12 @@ class BidRepository(
 
     /**
      * 刷新并持久化全市场竞价与盘中最新行情。
-     * - 盘中随时可刷新：更新最新价、实时涨幅(f3)、成交量等；
-     * - 竞价涨幅(f615)保持为 9:25 开盘竞价数值，若接口后续为 0 则自动继承早盘快照；
-     * - 时间快照更新为当前刷新时间。
+     * - 早盘竞价时段 (9:15 ~ 9:30)：正常拉取全市场竞价快照，计算竞价因子、评分、胜率并全额持久化入库；
+     * - 开盘后时段 (9:30 以后)：严格锁定早盘竞价数据！
+     *   * 竞价涨幅 (bidChange)、开盘价 (openPrice)、竞价预测胜率 (probability)、评分 (score)、
+     *     竞价换手 (bidTurnover)、实体预期 (entityChange) 严格继承早盘快照，绝不覆写！
+     *   * 仅同步更新盘中最新成交价 (latestPrice)、盘中实时涨幅 (realChange)、最新成交量与成交额。
+     *   * 若当日早盘尚未生成快照而在盘中首次打开，以接口数据固化并生成首份快照，后续刷新立即锁定。
      * @return 实际存入的股票条数
      */
     suspend fun refresh(config: BidStrategy.BidConfig, force: Boolean = true): Result<Int> =
@@ -115,35 +118,62 @@ class BidRepository(
             try {
                 val today = LocalDate.now().toString()
                 val now = LocalTime.now()
+                val isAfterOpen = now.isAfter(LocalTime.of(9, 30))
 
                 val rawItems = EastmoneyBidDataSource.fetchAll()
                 if (rawItems.isEmpty()) {
                     return@withContext Result.failure(RuntimeException("未拉取到竞价数据"))
                 }
 
-                // 读取已有快照中的竞价数值，防止接口在盘中或盘后清空 f615
+                // 读取已有快照中的竞价数值与早盘模型评分
                 val existingMap = bidDao.getByDate(today).associateBy { it.code }
-                val savedAt = now.format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                val hasMorningSnapshot = existingMap.isNotEmpty()
+
+                // 若 9:30 后已有早盘快照，固定时间戳为早盘时间；否则记录当前时间
+                val savedAt = if (hasMorningSnapshot && isAfterOpen) {
+                    val firstSavedAt = existingMap.values.first().savedAt
+                    if (firstSavedAt.isNotBlank()) firstSavedAt else now.format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                } else {
+                    now.format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+                }
 
                 val entities = rawItems.map { item ->
                     val existing = existingMap[item.code]
-                    // 竞价涨幅保护：优先用接口实时的 f615；若接口为 0 且本地有早盘快照则继承
-                    val finalBidChange = if (item.bidChange != 0.0) {
-                        item.bidChange
+
+                    if (existing != null && isAfterOpen) {
+                        // 9:30 之后严格锁定：竞价相关的所有因子与评分严格锁定，仅更新盘中最新价与实时涨幅
+                        existing.copy(
+                            latestPrice = item.latestPrice,
+                            realChange = item.realChange,
+                            volume = item.volume,
+                            amount = item.amount,
+                            turnover = item.turnover
+                        )
                     } else {
-                        existing?.bidChange ?: 0.0
+                        // 早盘竞价时段 (<= 9:30) 或当日首次入库：正常计算竞价涨幅与模型评分
+                        val finalBidChange = if (existing != null && existing.bidChange != 0.0 && isAfterOpen) {
+                            existing.bidChange
+                        } else if (item.bidChange != 0.0) {
+                            item.bidChange
+                        } else {
+                            existing?.bidChange ?: 0.0
+                        }
+
+                        val finalOpenPrice = if (existing != null && existing.openPrice > 0 && isAfterOpen) {
+                            existing.openPrice
+                        } else if (item.openPrice > 0) {
+                            item.openPrice
+                        } else {
+                            existing?.openPrice ?: item.latestPrice
+                        }
+
+                        val mergedItem = item.copy(
+                            bidChange = finalBidChange,
+                            openPrice = finalOpenPrice
+                        )
+                        val result = BidStrategy.compute(mergedItem, config)
+                        mergedItem.toEntity(today, result, savedAt)
                     }
-                    val finalOpenPrice = if (item.openPrice > 0) {
-                        item.openPrice
-                    } else {
-                        existing?.openPrice ?: item.latestPrice
-                    }
-                    val mergedItem = item.copy(
-                        bidChange = finalBidChange,
-                        openPrice = finalOpenPrice
-                    )
-                    val result = BidStrategy.compute(mergedItem, config)
-                    mergedItem.toEntity(today, result, savedAt)
                 }
                 bidDao.insertAll(entities)
 
@@ -177,6 +207,43 @@ class BidRepository(
         }
 
     /**
+     * 锁定筛选模式：仅读取锁定股票代码池中的标的，保证盘中刷新不增不减。
+     */
+    suspend fun getLockedResults(
+        lockedCodes: Set<String>,
+        date: String = LocalDate.now().toString()
+    ): Pair<List<BidStrategy.BidResult>, String> =
+        withContext(Dispatchers.IO) {
+            val entities = bidDao.getByDate(date)
+            val filtered = entities.filter { it.code in lockedCodes }
+                .map { it.toBidResult() }
+                .sortedByDescending { it.probability }
+            val savedAt = entities.firstOrNull()?.savedAt ?: ""
+            filtered to savedAt
+        }
+
+    /**
+     * 持久化锁定的股票池代码
+     */
+    fun saveLockedCodes(codes: Set<String>) {
+        val today = LocalDate.now().toString()
+        prefs.edit()
+            .putStringSet("locked_codes_$today", codes)
+            .putBoolean("is_locked_$today", codes.isNotEmpty())
+            .apply()
+    }
+
+    /**
+     * 读取今日锁定的股票池代码
+     */
+    fun loadLockedCodes(): Pair<Boolean, Set<String>> {
+        val today = LocalDate.now().toString()
+        val isLocked = prefs.getBoolean("is_locked_$today", false)
+        val codes = prefs.getStringSet("locked_codes_$today", emptySet()) ?: emptySet()
+        return isLocked to codes
+    }
+
+    /**
      * 获取当前筛选条件下的全部完整匹配结果(不截断, 用于完整数据导出)。
      */
     suspend fun getAllFilteredResults(
@@ -188,6 +255,15 @@ class BidRepository(
                 .filter { applyFilter(it, config) }
                 .map { it.toBidResult() }
                 .sortedByDescending { it.probability }
+        }
+
+    /**
+     * 获取指定日期符合高胜率配置的候选股票实体列表 (用于模拟交易分仓买入)
+     */
+    suspend fun getHighWinRateCandidates(date: String = LocalDate.now().toString()): List<BidDataEntity> =
+        withContext(Dispatchers.IO) {
+            bidDao.getByDate(date)
+                .filter { applyFilter(it, BidStrategy.BidConfig.HIGH_WIN_RATE) }
         }
 
     /**
@@ -221,8 +297,9 @@ class BidRepository(
         if (cfg.scoreMax > 0 && e.score > cfg.scoreMax) return false
         if (cfg.mvMin > 0 && e.circMv / 1e8 < cfg.mvMin) return false
         if (cfg.mvMax > 0 && e.circMv / 1e8 > cfg.mvMax) return false
-        if (cfg.priceMin > 0 && e.latestPrice < cfg.priceMin) return false
-        if (cfg.priceMax > 0 && e.latestPrice > cfg.priceMax) return false
+        val checkPrice = if (e.openPrice > 0) e.openPrice else e.latestPrice
+        if (cfg.priceMin > 0 && checkPrice < cfg.priceMin) return false
+        if (cfg.priceMax > 0 && checkPrice > cfg.priceMax) return false
         if (cfg.filterLargeVolume && e.volume < cfg.filterLargeVolumeThreshold) return false
 
         return true

@@ -31,7 +31,9 @@ data class BidAnalysisState(
     val searchCode: String = "",
     val searchResults: List<BidDataEntity> = emptyList(),
     val searchLoading: Boolean = false,
-    val availableDates: List<String> = emptyList()
+    val availableDates: List<String> = emptyList(),
+    val isPoolLocked: Boolean = false,
+    val lockedCodes: Set<String> = emptySet()
 ) {
     val displayResults: List<BidStrategy.BidResult>
         get() {
@@ -72,7 +74,14 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
     val backupFiles: StateFlow<List<BackupFileInfo>> = _backupFiles
 
     init {
-        _state.update { it.copy(config = repository.loadConfig()) }
+        val (isLocked, lockedCodes) = repository.loadLockedCodes()
+        _state.update {
+            it.copy(
+                config = repository.loadConfig(),
+                isPoolLocked = isLocked,
+                lockedCodes = lockedCodes
+            )
+        }
         loadBackupFiles()
     }
 
@@ -138,21 +147,47 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
 
     /**
      * 从本地 DB 按当前筛选条件加载展示列表。
-     * 若数据为空，或已保存的数据属于早盘开盘前(<=09:30)且当前已经开盘，自动后台拉取一次最新盘中行情。
+     * 若处于【锁定筛选】状态，仅拉取锁定股票代码池，保证盘中刷新不增不减。
      */
     fun loadFiltered(autoRefreshIfStale: Boolean = true) {
         viewModelScope.launch {
-            val (results, savedAt) = repository.getFilteredResults(_state.value.config)
+            val current = _state.value
+            val (results, savedAt) = if (current.isPoolLocked && current.lockedCodes.isNotEmpty()) {
+                repository.getLockedResults(current.lockedCodes)
+            } else {
+                repository.getFilteredResults(current.config)
+            }
             _state.update {
                 it.copy(results = results.take(500), savedAt = savedAt)
             }
-            if (autoRefreshIfStale) {
+            // 未锁定状态下，且早盘开盘后数据过旧，才自动刷新盘中价
+            if (autoRefreshIfStale && !current.isPoolLocked) {
                 val now = java.time.LocalTime.now()
                 val isTradingOrAfter = now.isAfter(java.time.LocalTime.of(9, 30))
                 val isBeforeOpenSnapshot = savedAt.isNotEmpty() && savedAt < "09:30:00"
                 if (results.isEmpty() || (isTradingOrAfter && isBeforeOpenSnapshot)) {
                     refresh()
                 }
+            }
+        }
+    }
+
+    /**
+     * 切换【锁定筛选池】/【解除锁定】状态。
+     * - 锁定：将当前列表中的股票代码固化，盘中刷新只更新这几只股票的最新价与涨幅，绝不增减股票或漂移竞价数据；
+     * - 解锁：解除锁定，允许根据参数动态全市场重筛。
+     */
+    fun toggleLockPool() {
+        val current = _state.value
+        if (current.isPoolLocked) {
+            _state.update { it.copy(isPoolLocked = false, lockedCodes = emptySet()) }
+            repository.saveLockedCodes(emptySet())
+            loadFiltered(autoRefreshIfStale = false)
+        } else {
+            val codes = current.results.map { it.item.code }.toSet()
+            if (codes.isNotEmpty()) {
+                _state.update { it.copy(isPoolLocked = true, lockedCodes = codes) }
+                repository.saveLockedCodes(codes)
             }
         }
     }
@@ -226,5 +261,12 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
                 onResult(false, "导出异常: ${e.message}")
             }
         }
+    }
+
+    /**
+     * 获取今日符合高胜率配置的候选股票 (用于模拟盘分仓买入)
+     */
+    suspend fun getTodayHighWinRateCandidates(): List<BidDataEntity> {
+        return repository.getHighWinRateCandidates()
     }
 }

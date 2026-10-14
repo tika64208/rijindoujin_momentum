@@ -15,8 +15,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -29,11 +32,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.momentum.data.SimTradingManager
 import com.example.momentum.data.db.BidDataEntity
 import com.example.momentum.engine.BidStrategy
 import com.example.momentum.ui.component.TabDocSheet
 import com.example.momentum.ui.component.TabDocs
 import com.example.momentum.ui.theme.*
+import kotlinx.coroutines.launch
 import com.example.momentum.util.FinanceFormatter
 
 private fun formatPrice(v: Double): String = FinanceFormatter.formatPrice(v)
@@ -50,8 +55,12 @@ fun BidAnalysisScreen(
 ) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var showBackupSheet by remember { mutableStateOf(false) }
     var showDocSheet by remember { mutableStateOf(false) }
+    var showSimSheet by remember { mutableStateOf(false) }
+    var showMoreMenu by remember { mutableStateOf(false) }
+    var todayCandidates by remember { mutableStateOf<List<BidDataEntity>>(emptyList()) }
 
     LaunchedEffect(Unit) {
         viewModel.loadFiltered()
@@ -72,16 +81,34 @@ fun BidAnalysisScreen(
         )
     }
 
+    if (showSimSheet) {
+        val todayStr = remember { java.time.LocalDate.now().toString() }
+        SimTradingSheet(
+            todayDate = todayStr,
+            todayCandidates = todayCandidates,
+            onDismiss = { showSimSheet = false },
+            onStockClick = onStockClick
+        )
+    }
+
     Scaffold(
         topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text("竞价分析", fontWeight = FontWeight.Bold) },
+            TopAppBar(
+                title = { Text("竞价分析", fontWeight = FontWeight.Bold, fontSize = 17.sp) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
                     }
                 },
                 actions = {
+                    TextButton(onClick = {
+                        scope.launch {
+                            todayCandidates = viewModel.getTodayHighWinRateCandidates()
+                            showSimSheet = true
+                        }
+                    }) {
+                        Text("💰 模拟盘", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
                     IconButton(onClick = { showDocSheet = true }) {
                         Icon(
                             Icons.Filled.Info,
@@ -89,24 +116,46 @@ fun BidAnalysisScreen(
                             tint = Color.White
                         )
                     }
-                    TextButton(onClick = { showBackupSheet = true }) {
-                        Text("备份", color = Color.White, fontSize = 13.sp)
+                    IconButton(onClick = { viewModel.refresh() }, enabled = !state.loading) {
+                        Icon(
+                            Icons.Filled.Refresh,
+                            contentDescription = "刷新",
+                            tint = Color.White
+                        )
                     }
-                    TextButton(
-                        onClick = {
-                            viewModel.exportFilteredData(context) { _, msg ->
-                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        enabled = !state.loading && state.results.isNotEmpty()
-                    ) {
-                        Text("导出", color = Color.White, fontSize = 13.sp)
-                    }
-                    TextButton(onClick = { viewModel.refresh() }, enabled = !state.loading) {
-                        Text("刷新", color = Color.White, fontSize = 13.sp)
+                    Box {
+                        IconButton(onClick = { showMoreMenu = true }) {
+                            Icon(
+                                Icons.Filled.MoreVert,
+                                contentDescription = "更多",
+                                tint = Color.White
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showMoreMenu,
+                            onDismissRequest = { showMoreMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("📁 每日全量备份") },
+                                onClick = {
+                                    showMoreMenu = false
+                                    showBackupSheet = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("📥 导出完整数据(CSV)") },
+                                onClick = {
+                                    showMoreMenu = false
+                                    viewModel.exportFilteredData(context) { _, msg ->
+                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                enabled = !state.loading && state.results.isNotEmpty()
+                            )
+                        }
                     }
                 },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = Blue700, titleContentColor = Color.White
                 )
             )
@@ -114,11 +163,60 @@ fun BidAnalysisScreen(
         containerColor = SurfaceBg
     ) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-            // 数据时间提示
+            // 数据时间提示 (早盘9:30后明确指示快照已锁定)
             if (state.savedAt.isNotEmpty() && !state.loading) {
                 item {
-                    Text("📊 数据时间: ${state.savedAt}", fontSize = 11.sp, color = Color.Gray,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+                    val isEarlySnapshot = state.savedAt <= "09:30:00"
+                    val label = if (isEarlySnapshot) "📊 早盘集合竞价快照已锁定 (${state.savedAt})" else "📊 竞价数据快照时间: ${state.savedAt}"
+                    Text(
+                        text = label,
+                        fontSize = 11.sp,
+                        color = if (isEarlySnapshot) Blue700 else Color.Gray,
+                        fontWeight = if (isEarlySnapshot) FontWeight.SemiBold else FontWeight.Normal,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+                    )
+                }
+            }
+            // 100万模拟盘资产小看板 (点击直接进入模拟买入/结算)
+            item {
+                val simManager = remember { SimTradingManager.get(context) }
+                val simAccount by simManager.accountState.collectAsState()
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                        .clickable {
+                            scope.launch {
+                                todayCandidates = viewModel.getTodayHighWinRateCandidates()
+                                showSimSheet = true
+                            }
+                        },
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFEFF6FF)),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("💰 100万模拟盘:", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Blue700)
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = String.format("¥%,.0f (%+.2f%%)", simAccount.currentCapital, simAccount.totalReturnPct),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (simAccount.totalProfit >= 0) Red600 else Green600
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("去买入/结算", fontSize = 11.sp, color = Blue700, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.width(2.dp))
+                            Icon(Icons.AutoMirrored.Filled.ArrowForwardIos, contentDescription = null, tint = Blue700, modifier = Modifier.size(10.dp))
+                        }
+                    }
                 }
             }
             // 搜索框 + 历史查询
@@ -156,7 +254,28 @@ fun BidAnalysisScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("共 ${state.results.size} 只", fontSize = 12.sp, color = Color.Gray)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("共 ${state.results.size} 只", fontSize = 12.sp, color = Color.Gray)
+                            Spacer(Modifier.width(8.dp))
+                            // 锁定筛选池按钮 (防止盘中刷新数据漂移)
+                            Surface(
+                                color = if (state.isPoolLocked) Color(0xFFDCFCE7) else Color(0xFFF1F5F9),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.clickable { viewModel.toggleLockPool() }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = if (state.isPoolLocked) "🔒 筛选池已锁定" else "🔓 点击锁定筛选池",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (state.isPoolLocked) Green600 else Color(0xFF475569)
+                                    )
+                                }
+                            }
+                        }
                         TextButton(
                             onClick = {
                                 viewModel.exportFilteredData(context) { _, msg ->
