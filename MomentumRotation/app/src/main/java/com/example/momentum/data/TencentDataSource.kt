@@ -74,7 +74,8 @@ object TencentDataSource {
         val price: Double,
         val volume: Double,
         val amount: Double,
-        val avgPrice: Double = price  // 均价(个股无此字段, 板块有)
+        val avgPrice: Double = price,  // 均价(个股无此字段, 板块有)
+        val preClose: Double = 0.0     // 昨日收盘价
     )
 
     /**
@@ -86,25 +87,39 @@ object TencentDataSource {
             val json = httpGetJson("https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=$symbol")
             val node = json.optJSONObject("data")?.optJSONObject(symbol) ?: return emptyList()
             val rows = node.optJSONObject("data")?.optJSONArray("data") ?: return emptyList()
+            val qtArr = node.optJSONObject("qt")?.optJSONArray(symbol)
+            val preClose = qtArr?.optString(4)?.toDoubleOrNull() ?: 0.0
             val points = ArrayList<MinutePoint>(rows.length())
-            var cumVolume = 0.0
-            var cumAmount = 0.0
+            val isKcb = symbol.startsWith("sh688") || symbol.startsWith("688")
+            var prevVol = 0.0
+            var prevAmt = 0.0
             for (i in 0 until rows.length()) {
                 val cols = rows.getString(i).split(" ")
                 if (cols.size >= 4) {
-                    val vol = cols[2].toDoubleOrNull() ?: 0.0
-                    val amt = cols[3].toDoubleOrNull() ?: 0.0
-                    cumVolume += vol
-                    cumAmount += amt
-                    // 均价 = 累计成交额 / (累计成交量 × 100)  [vol是手, ×100转股]
-                    val avg = if (cumVolume > 0) cumAmount / (cumVolume * 100.0) else (cols[1].toDoubleOrNull() ?: 0.0)
+                    val price = cols[1].toDoubleOrNull() ?: 0.0
+                    val cumVol = cols[2].toDoubleOrNull() ?: 0.0
+                    val cumAmt = cols[3].toDoubleOrNull() ?: 0.0
+                    val minuteVol = if (i > 0 && cumVol >= prevVol) cumVol - prevVol else cumVol
+                    val minuteAmt = if (i > 0 && cumAmt >= prevAmt) cumAmt - prevAmt else cumAmt
+                    prevVol = cumVol
+                    prevAmt = cumAmt
+
+                    // 均价计算：科创板(688)成交量单位为股，主板/创业板为手(需*100)
+                    // 同时校验: 若 cumAmt / (cumVol * price) 远小于 10，则单位为股
+                    val isUnitShare = isKcb || (cumVol > 0 && price > 0 && (cumAmt / (cumVol * price)) < 10.0)
+                    val avg = when {
+                        cumVol <= 0 -> price
+                        isUnitShare -> cumAmt / cumVol
+                        else -> cumAmt / (cumVol * 100.0)
+                    }
                     points.add(
                         MinutePoint(
                             time = cols[0].substring(0..1) + ":" + cols[0].substring(2..3),
-                            price = cols[1].toDoubleOrNull() ?: 0.0,
-                            volume = vol,
-                            amount = amt,
-                            avgPrice = avg
+                            price = price,
+                            volume = minuteVol,
+                            amount = minuteAmt,
+                            avgPrice = avg,
+                            preClose = preClose
                         )
                     )
                 }
@@ -130,7 +145,9 @@ object TencentDataSource {
                 userAgent = UA_MOBILE
             )
             val json = JSONObject(text)
-            val trends = json.optJSONObject("data")?.optJSONArray("trends") ?: return emptyList()
+            val dataObj = json.optJSONObject("data") ?: return emptyList()
+            val preClose = dataObj.optDouble("preClose", 0.0)
+            val trends = dataObj.optJSONArray("trends") ?: return emptyList()
             val points = ArrayList<MinutePoint>(trends.length())
             for (i in 0 until trends.length()) {
                 val cols = trends.getString(i).split(",")
@@ -143,7 +160,8 @@ object TencentDataSource {
                             price = cols[1].toDoubleOrNull() ?: 0.0,
                             volume = cols[5].toDoubleOrNull() ?: 0.0,
                             amount = cols[6].toDoubleOrNull() ?: 0.0,
-                            avgPrice = cols[2].toDoubleOrNull() ?: 0.0
+                            avgPrice = cols[2].toDoubleOrNull() ?: 0.0,
+                            preClose = preClose
                         )
                     )
                 }

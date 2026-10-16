@@ -25,7 +25,7 @@ import com.example.momentum.ui.theme.*
 @Composable
 fun KLineChart(
     bars: List<DailyBar>,
-    modifier: Modifier = Modifier,
+    modifier: Modifier = Modifier.fillMaxWidth().height(240.dp),
     showDays: Int = 60  // 显示最近N根K线
 ) {
     Card(
@@ -33,7 +33,7 @@ fun KLineChart(
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White)
     ) {
-        Column(Modifier.padding(8.dp)) {
+        Column(Modifier.fillMaxSize().padding(8.dp)) {
             Text("日K线走势(前复权)", fontWeight = FontWeight.SemiBold, fontSize = 14.sp, color = Blue700)
             Spacer(Modifier.height(4.dp))
 

@@ -263,13 +263,13 @@ fun StockDetailScreen(
                 if (showKLine) {
                     KLineChart(
                         bars = dailyBars,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth().height(240.dp)
                     )
                 } else {
                     MinuteChartCard(
                         title = "$name 分时走势",
                         points = stockData,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth().height(220.dp)
                     )
                 }
                 // 切换按钮
@@ -358,10 +358,11 @@ private fun MinuteChartCard(
                     Text("暂无数据", color = Color.Gray, fontSize = 13.sp)
                 }
             } else {
-                // 最新价 + 涨跌幅
-                val first = points.first().price
+                // 最新价 + 涨跌幅 (优先以昨日收盘价 preClose 为基准计算真实涨跌幅)
+                val preClose = points.firstOrNull { it.preClose > 0 }?.preClose ?: 0.0
                 val last = points.last().price
-                val chg = if (first > 0) (last / first - 1.0) * 100 else 0.0
+                val base = if (preClose > 0) preClose else points.first().price
+                val chg = if (base > 0) (last / base - 1.0) * 100 else 0.0
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
@@ -379,7 +380,7 @@ private fun MinuteChartCard(
                 }
                 Spacer(Modifier.height(4.dp))
                 // 价格图(含均价线) + 成交量副图
-                Column {
+                Column(Modifier.fillMaxSize()) {
                     PriceChart(points, Modifier.fillMaxWidth().weight(3f))
                     VolumeChart(points, Modifier.fillMaxWidth().weight(1f))
                 }
@@ -409,12 +410,25 @@ private fun PriceChart(points: List<TencentDataSource.MinutePoint>, modifier: Mo
 
         val prices = points.map { it.price }
         val avgs = points.map { it.avgPrice }
-        val minP = minOf(prices.min(), avgs.filter { it > 0 }.min())
-        val maxP = maxOf(prices.max(), avgs.max())
+        val priceMin = prices.min()
+        val priceMax = prices.max()
+        val preClose = points.firstOrNull { it.preClose > 0 }?.preClose ?: 0.0
+        val refPrice = if (preClose > 0) preClose else points.first().price
+
+        // 过滤掉偏离真实股价过大的均价点，防止异常点撑爆 Y 轴
+        val validAvgs = avgs.filter { it > 0 && it >= priceMin * 0.7 && it <= priceMax * 1.3 }
+        val rawMin = if (validAvgs.isNotEmpty()) minOf(priceMin, validAvgs.min(), refPrice) else minOf(priceMin, refPrice)
+        val rawMax = if (validAvgs.isNotEmpty()) maxOf(priceMax, validAvgs.max(), refPrice) else maxOf(priceMax, refPrice)
+
+        // 若波动极小或平盘，增加保底视距缓冲(至少 ±0.5%)，上下留白避免贴边或画成死直线
+        val diff = (rawMax - rawMin).coerceAtLeast(refPrice * 0.005)
+        val padY = diff * 0.08
+        val minP = (rawMin - padY).coerceAtLeast(0.01)
+        val maxP = rawMax + padY
         if (maxP <= minP) return@Canvas
 
         fun xTo(i: Int): Float = padLeft + chartW * (i.toFloat() / (n - 1))
-        fun yTo(p: Double): Float = padTop + chartH * (1f - ((p - minP) / (maxP - minP)).toFloat())
+        fun yTo(p: Double): Float = padTop + chartH * (1f - ((p.coerceIn(minP, maxP) - minP) / (maxP - minP)).toFloat())
 
         // Y 轴刻度(3条, 左侧价格区间)
         val gridLines = 3
@@ -429,11 +443,16 @@ private fun PriceChart(points: List<TencentDataSource.MinutePoint>, modifier: Mo
             )
         }
 
-        // 昨收线(开盘价)
-        val open = points.first().price
-        if (open in minP..maxP) {
-            val yRef = yTo(open)
-            drawLine(Color(0xFF94A3B8), Offset(padLeft, yRef), Offset(w - padRight, yRef), 1f)
+        // 昨收参考线(灰色虚线)
+        if (refPrice in minP..maxP) {
+            val yRef = yTo(refPrice)
+            drawLine(
+                color = Color(0xFF94A3B8),
+                start = Offset(padLeft, yRef),
+                end = Offset(w - padRight, yRef),
+                strokeWidth = 1f,
+                pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(8f, 6f), 0f)
+            )
         }
 
         // 均价线(黄色)

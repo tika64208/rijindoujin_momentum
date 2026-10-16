@@ -234,6 +234,23 @@ class BidRepository(
      * 对实体进行竞价纯净性校准：确保评分和概率完全由早盘竞价数据决定，不受盘中股价波动污染。
      */
     private fun sanitizeEntity(e: BidDataEntity, config: BidStrategy.BidConfig): BidDataEntity {
+        // 若早盘已保存快照且已有预测结果，保持早盘锁定的竞价因子、概率与评分，防止被盘中累计成交量重算污染
+        if (e.savedAt.isNotBlank() && e.savedAt <= "09:30:00" && e.probability > 0) {
+            val (excluded, reason) = BidStrategy.getExcludeStatus(
+                BidStrategy.BidItem(
+                    code = e.code,
+                    name = e.name,
+                    latestPrice = if (e.openPrice > 0) e.openPrice else e.latestPrice,
+                    realChange = e.bidChange,
+                    openPrice = e.openPrice,
+                    circMv = e.circMv,
+                    bidChange = e.bidChange
+                ),
+                config
+            )
+            return e.copy(excluded = excluded, excludeReason = reason)
+        }
+
         val basePrice = if (e.openPrice > 0) e.openPrice else e.latestPrice
         val rawItem = BidStrategy.BidItem(
             code = e.code,
@@ -254,7 +271,9 @@ class BidRepository(
         return e.copy(
             probability = res.probability,
             confidence = res.confidence,
-            score = res.score
+            score = res.score,
+            excluded = res.excluded,
+            excludeReason = res.excludeReason
         )
     }
 
