@@ -67,6 +67,35 @@ fun BidAnalysisScreen(
         viewModel.loadDates()
     }
 
+    // 9:29:30 自动刷新：竞价撮合完成后的黄金时点，自动拉取当日全量竞价快照（仅交易日触发一次/天）
+    LaunchedEffect(Unit) {
+        var lastAutoRefreshDate: java.time.LocalDate? = null
+        while (true) {
+            val now = java.time.LocalTime.now()
+            val today = java.time.LocalDate.now()
+            val target = java.time.LocalTime.of(9, 29, 30)
+            val isWeekday = today.dayOfWeek.value in 1..5
+
+            if (isWeekday && !now.isBefore(target) && lastAutoRefreshDate != today) {
+                lastAutoRefreshDate = today
+                viewModel.refresh()
+                kotlinx.coroutines.delay(60_000) // 刷新后等待 1 分钟再进入下一轮判断
+                continue
+            }
+
+            // 计算下一个 9:29:30
+            val nextTarget = if (now.isBefore(target)) {
+                java.time.LocalDateTime.of(today, target)
+            } else {
+                java.time.LocalDateTime.of(today.plusDays(1), target)
+            }
+            val delayMs = java.time.Duration.between(
+                java.time.LocalDateTime.now(), nextTarget
+            ).toMillis().coerceAtLeast(1000)
+            kotlinx.coroutines.delay(delayMs)
+        }
+    }
+
     if (showBackupSheet) {
         DailyBackupSheet(
             viewModel = viewModel,

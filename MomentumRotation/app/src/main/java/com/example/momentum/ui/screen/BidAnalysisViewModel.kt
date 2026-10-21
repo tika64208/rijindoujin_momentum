@@ -131,16 +131,24 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
      * 拉取全市场竞价与盘中最新行情并更新本地快照。
      */
     fun refresh() {
-        if (_state.value.loading) return
+        // 取消上一次可能卡死的请求，确保 loading 状态不会永久锁死刷新按钮
         job?.cancel()
         _state.update { it.copy(loading = true, error = null) }
         job = viewModelScope.launch {
-            val result = repository.refresh(_state.value.config)
-            result.onSuccess {
+            try {
+                val result = repository.refresh(_state.value.config)
+                result.onSuccess {
+                    _state.update { it.copy(loading = false) }
+                    loadFiltered(autoRefreshIfStale = false)
+                }.onFailure { err ->
+                    _state.update { it.copy(loading = false, error = "获取竞价数据失败: ${err.message}") }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 任务被新请求取消：重置 loading，避免按钮永久禁用
                 _state.update { it.copy(loading = false) }
-                loadFiltered(autoRefreshIfStale = false)
-            }.onFailure { err ->
-                _state.update { it.copy(loading = false, error = "获取竞价数据失败: ${err.message}") }
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(loading = false, error = "获取竞价数据失败: ${e.message}") }
             }
         }
     }
