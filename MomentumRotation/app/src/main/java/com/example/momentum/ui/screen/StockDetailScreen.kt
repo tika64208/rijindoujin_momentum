@@ -33,6 +33,7 @@ import com.example.momentum.data.MoneyFlowDataSource
 import com.example.momentum.data.TencentDataSource
 import com.example.momentum.data.db.AppDatabase
 import com.example.momentum.data.db.BidDataEntity
+import com.example.momentum.data.db.WanlongHitEntity
 import com.example.momentum.engine.MacdEngine
 import com.example.momentum.model.DailyBar
 import com.example.momentum.model.Stock
@@ -69,6 +70,7 @@ fun StockDetailScreen(
     var bidHistory by remember { mutableStateOf<List<BidDataEntity>>(emptyList()) }
     var bidLoading by remember { mutableStateOf(true) }
     var dailyBars by remember { mutableStateOf<List<DailyBar>>(emptyList()) }
+    var wanlongHits by remember { mutableStateOf<List<WanlongHitEntity>>(emptyList()) }  // 万龙信号(日K图标记)
     var showKLine by remember { mutableStateOf(false) }  // false=分时, true=日K
     var loading by remember { mutableStateOf(true) }
     var errorNotice by remember { mutableStateOf<String?>(null) }
@@ -128,8 +130,16 @@ fun StockDetailScreen(
                         }
                     }
                 }
-                dailyBars = bars
-                macdData = MacdEngine.compute(bars)
+                dailyBars = if (bars.isNotEmpty()) bars else {
+                    // 网络受限(腾讯501/WAF+东财备用也空)时回退本地DB缓存K线
+                    // (万龙信号股/扫描候选股均有400根本地缓存, 保证日K图与🐉标记可用)
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        AppDatabase.get(context).dailyBarDao().getBars(symbol)
+                            .sortedBy { it.date }
+                            .map { DailyBar(it.date, it.open, it.high, it.low, it.close, it.volume) }
+                    }
+                }
+                macdData = MacdEngine.compute(dailyBars)
 
                 // 板块 MACD: 用指数日线数据计算(近一年)
                 val boardBars = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
@@ -207,6 +217,19 @@ fun StockDetailScreen(
                 bidLoading = false
             }
         }
+
+        // 万龙信号历史异步加载(日K图🐉标记用, 来自本地永久信号库)
+        scope.launch {
+            try {
+                val db = AppDatabase.get(context)
+                val hits = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    db.wanlongDao().getByCode(code)
+                }
+                wanlongHits = hits
+            } catch (e: Exception) {
+                CrashLogManager.recordError("StockDetailScreen", "万龙信号加载失败($code): ${e.message}", e)
+            }
+        }
     }
 
     Scaffold(
@@ -271,6 +294,7 @@ fun StockDetailScreen(
                 if (showKLine) {
                     KLineChart(
                         bars = dailyBars,
+                        signalDates = wanlongHits.map { it.date }.toSet(),
                         modifier = Modifier.fillMaxWidth().height(240.dp)
                     )
                 } else {

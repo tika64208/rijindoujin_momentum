@@ -20,6 +20,9 @@ interface WanlongDao {
     @Query("SELECT DISTINCT date FROM wanlong_hits ORDER BY date DESC")
     suspend fun getAllDates(): List<String>
 
+    @Query("SELECT * FROM wanlong_hits WHERE code = :code ORDER BY date DESC")
+    suspend fun getByCode(code: String): List<WanlongHitEntity>
+
     @Query("DELETE FROM wanlong_hits WHERE date = :date")
     suspend fun deleteByDate(date: String)
 }
