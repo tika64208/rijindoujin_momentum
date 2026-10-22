@@ -46,6 +46,17 @@ data class WanlongItem(
     val maxReturn: Double? = null  // T+1~T+5 期间最高冲高%
 )
 
+/** 双龙出水条目: 同一股票任意两次万龙信号间隔 ≤90 个自然日(不要求是否今天/近期, 历史信号同样计入)。 */
+data class DoubleDragonItem(
+    val code: String,
+    val name: String,
+    val hitCount: Int,               // 历史信号总次数(不同交易日)
+    val dates: List<String>,         // 信号日期列表(新→旧)
+    val lastClose: Double,          // 最近一次信号日收盘价
+    val lastChgPct: Double = 0.0,  // 最近一次信号日涨幅%
+    val latestT1: Double? = null    // 最近信号日的 T+1 表现(如有)
+)
+
 /** 某一交易日的万龙选股结果。 */
 data class WanlongDayResult(
     val date: String,
@@ -68,6 +79,7 @@ data class WanlongStats(
 data class MyttState(
     val loading: Boolean = false,
     val dayResults: List<WanlongDayResult> = emptyList(),
+    val doubleDragonItems: List<DoubleDragonItem> = emptyList(),
     val stats: WanlongStats? = null,
     val error: String? = null,
     val currentDate: String = "",
@@ -85,9 +97,14 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
     private var scanJob: Job? = null
 
     companion object {
-        // 320 根日线完全覆盖 89 周期与 150 周期过滤，精度 100% 对齐
-        private const val TARGET_BAR_COUNT = 320
+        // 400 根日线: 90 日回溯窗口内最旧日期(约64个交易日前)仍有 ≥300 根满足计算下限,
+        // 且完全覆盖 89 周期与 150 周期过滤, 精度 100% 对齐
+        private const val TARGET_BAR_COUNT = 400
         private const val CONCURRENT_DOWNLOADS = 5
+        // 双龙出水判定: 任意两次万龙信号间隔 ≤90 个自然日即成「双龙出水」(不锚定今天, 历史信号同样计入)
+        private const val REPEAT_WINDOW_DAYS = 90L
+        // 池接口连续空 N 天则停止向前回溯(实测池历史深度仅约28个自然日, 更早需靠每日扫描滚动沉淀)
+        private const val MAX_EMPTY_POOL_STREAK = 10
     }
 
     init {
@@ -103,11 +120,12 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
             withContext(Dispatchers.IO) {
                 val entities = database.wanlongDao().getAll()
                 if (entities.isNotEmpty()) {
-                    val grouped = buildDayResultsAndStats(entities)
+                    val (days, dragons, stats) = buildDayResultsAndStats(entities)
                     _state.update {
                         it.copy(
-                            dayResults = grouped.first,
-                            stats = grouped.second,
+                            dayResults = days,
+                            doubleDragonItems = dragons,
+                            stats = stats,
                             loading = false
                         )
                     }
@@ -123,14 +141,14 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
         scanJob = viewModelScope.launch {
             try {
                 val results = withContext(Dispatchers.IO) { scanByDay() }
-                _state.update { it.copy(loading = false, dayResults = results.first, stats = results.second, error = null) }
+                _state.update { it.copy(loading = false, dayResults = results.first, doubleDragonItems = results.second, stats = results.third, error = null) }
             } catch (e: Exception) {
                 _state.update { it.copy(loading = false, error = "选股失败: ${e.message}") }
             }
         }
     }
 
-    private suspend fun scanByDay(): Pair<List<WanlongDayResult>, WanlongStats?> {
+    private suspend fun scanByDay(): Triple<List<WanlongDayResult>, List<DoubleDragonItem>, WanlongStats?> {
         val today = LocalDate.now().toString()
         val nameMap = loadNameMap().toMutableMap()
         val candidateMap = mutableMapOf<String, String>() // code -> name
@@ -139,15 +157,18 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
 
         _state.update { it.copy(currentDate = "检查涨停池与本地缓存...", candidateCount = 5, scannedCount = 0) }
 
-        // 1. 获取最近 5 个实际交易日 (自动跳过周末与法定节假日，带本地持久化缓存)
+        // 1. 获取近 90 个自然日内的交易日涨停池 (带本地持久化缓存; 池历史深度有限, 连续空 N 天停止)
+        val windowStart = LocalDate.now().minusDays(REPEAT_WINDOW_DAYS)
         var cur = LocalDate.now()
         var daysBack = 0
-        while (recentDates.size < 5 && daysBack < 20) {
+        var emptyPoolStreak = 0
+        while (cur.isAfter(windowStart) && daysBack < REPEAT_WINDOW_DAYS + 5 && emptyPoolStreak < MAX_EMPTY_POOL_STREAK) {
             if (cur.dayOfWeek != DayOfWeek.SATURDAY && cur.dayOfWeek != DayOfWeek.SUNDAY) {
                 val dStr = cur.toString()
                 val date8 = dStr.replace("-", "")
                 val pool = getOrFetchZtPool(dStr, date8)
                 if (pool.isNotEmpty()) {
+                    emptyPoolStreak = 0
                     recentDates.add(dStr)
                     dateToCandidates[dStr] = pool
                     pool.forEach {
@@ -155,6 +176,9 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
                         nameMap[it.code] = it.name
                     }
                     _state.update { it.copy(scannedCount = recentDates.size) }
+                } else if (dStr != LocalDate.now().toString()) {
+                    // 非今日且池为空: 可能是节假日或超出池接口历史深度
+                    emptyPoolStreak++
                 }
             }
             cur = cur.minusDays(1)
@@ -170,7 +194,7 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (recentDates.isEmpty()) {
-            return emptyList<WanlongDayResult>() to null
+            return Triple(emptyList<WanlongDayResult>(), emptyList<DoubleDragonItem>(), null)
         }
 
         // 2. 日线数据严格「存 DB，当日已更新则不重复下载」
@@ -180,7 +204,7 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
         for (code in uniqueCandidates) {
             val symbol = Stock.toMarketPrefix(code)
             val meta = database.dailyBarDao().getMeta(symbol)
-            val isFresh = meta != null && meta.barCount >= 300 && meta.lastUpdateDate == today
+            val isFresh = meta != null && meta.barCount >= TARGET_BAR_COUNT && meta.lastUpdateDate == today
             if (!isFresh) {
                 neededToFetch.add(code)
             }
@@ -233,6 +257,11 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
         val newEntitiesToInsert = mutableListOf<WanlongHitEntity>()
         val timeNow = java.time.LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
 
+        // 增量去重: 已入库的 (日期, 代码) 信号对跳过, 避免重复扫描与重复入库
+        val existingPairs = database.wanlongDao().getAll()
+            .map { "${it.date}|${it.code}" }
+            .toHashSet()
+
         for (date in recentDates) {
             _state.update { it.copy(currentDate = date, scannedCount = 0) }
 
@@ -248,6 +277,11 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(candidateCount = targetCodes.size) }
 
             targetCodes.forEachIndexed { idx, (code, name) ->
+                // 增量去重: 该日期该股票已出过信号, 直接跳过计算
+                if ("$date|$code" in existingPairs) {
+                    _state.update { it.copy(scannedCount = idx + 1) }
+                    return@forEachIndexed
+                }
                 val symbol = Stock.toMarketPrefix(code)
                 val bars = database.dailyBarDao().getBars(symbol)
                     .filter { it.date <= date }
@@ -289,7 +323,8 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * 计算并组装各交易日结果及出信号后 N 日涨跌幅跟踪与胜率看板。
      */
-    private suspend fun buildDayResultsAndStats(entities: List<WanlongHitEntity>): Pair<List<WanlongDayResult>, WanlongStats?> {
+    private suspend fun buildDayResultsAndStats(entities: List<WanlongHitEntity>): Triple<List<WanlongDayResult>, List<DoubleDragonItem>, WanlongStats?> {
+        val doubleDragonItems = buildDoubleDragonItems(entities)
         val groupedByDate = entities.groupBy { it.date }.toSortedMap(reverseOrder())
         val dayResults = mutableListOf<WanlongDayResult>()
         val allEvaluatedItems = mutableListOf<WanlongItem>()
@@ -368,7 +403,57 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
             WanlongStats(totalSignals = entities.size, evaluatedCount = 0)
         } else null
 
-        return dayResults to stats
+        return Triple(dayResults, doubleDragonItems, stats)
+    }
+
+    /**
+     * 计算「双龙出水」: 同一标的历史上任意两个不同交易日的万龙信号间隔 ≤90 个自然日即上榜。
+     * 不锚定今天 —— 不要求最近一次信号在今天或近90日内, 历史沉淀信号同样计入。
+     * 双龙先后出水(如海洋王反复启动)代表庄家试盘明显、近期有动作 —— 择机进场,
+     * 比单次信号持续性更强, 在页面以独立表格单独列出。
+     */
+    private suspend fun buildDoubleDragonItems(entities: List<WanlongHitEntity>): List<DoubleDragonItem> {
+        if (entities.size < 2) return emptyList()
+
+        val byCode = entities.groupBy { it.code }
+        val result = mutableListOf<DoubleDragonItem>()
+        for ((code, hits) in byCode) {
+            val distinctDays = hits.map { it.date }.distinct().sortedDescending()
+            // 任意两次信号间隔 ≤ REPEAT_WINDOW_DAYS 即双龙出水(检查相邻日期对即可覆盖任意组合)
+            val isDoubleDragon = distinctDays.zipWithNext().any { (newer, older) ->
+                LocalDate.parse(newer).toEpochDay() - LocalDate.parse(older).toEpochDay() <= REPEAT_WINDOW_DAYS
+            }
+            if (isDoubleDragon) {
+                val latest = hits.first { it.date == distinctDays.first() }
+
+                // 最近信号日的 T+1 收盘表现(如已收盘且有数据)
+                var latestT1: Double? = null
+                val symbol = Stock.toMarketPrefix(code)
+                val bars = database.dailyBarDao().getBars(symbol).sortedBy { it.date }
+                val idx = bars.indexOfFirst { it.date == latest.date }
+                if (idx != -1 && latest.close > 0) {
+                    bars.getOrNull(idx + 1)?.let { next ->
+                        latestT1 = (next.close - latest.close) / latest.close * 100.0
+                    }
+                }
+
+                result.add(
+                    DoubleDragonItem(
+                        code = code,
+                        name = latest.name,
+                        hitCount = distinctDays.size,
+                        dates = distinctDays,
+                        lastClose = latest.close,
+                        lastChgPct = latest.chgPct,
+                        latestT1 = latestT1
+                    )
+                )
+            }
+        }
+        // 排序: 信号次数多优先, 其次最近信号日新优先
+        return result.sortedWith(
+            compareByDescending<DoubleDragonItem> { it.hitCount }.thenByDescending { it.dates.first() }
+        )
     }
 
     private fun getOrFetchZtPool(dStr: String, date8: String): List<EastmoneyZtDataSource.ZtCandidate> {

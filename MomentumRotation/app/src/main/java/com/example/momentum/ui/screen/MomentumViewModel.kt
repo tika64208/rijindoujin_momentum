@@ -70,6 +70,12 @@ class MomentumViewModel(
     val state: StateFlow<UiState> = _state
 
     init {
+        // 跨 Tab 自选股同步: 双龙出水等其它页面写入自选池后, 自动重载
+        viewModelScope.launch {
+            com.example.momentum.data.WatchlistStore.version.collect {
+                if (it > 0) loadWatchlist()
+            }
+        }
         // 启动时从 SharedPreferences 读回自选股(代码+名称), 覆盖内置示例池,
         // 使「手动添加自选」在应用关闭/重启(或进程被 kill)后依然保留。
         loadWatchlist()

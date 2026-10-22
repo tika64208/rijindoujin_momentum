@@ -2,6 +2,7 @@ package com.example.momentum.ui.screen
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.material3.Surface
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -15,13 +16,18 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.momentum.data.WatchlistStore
 import com.example.momentum.ui.component.TabDocSheet
 import com.example.momentum.ui.component.TabDocs
 import com.example.momentum.ui.theme.*
+import android.widget.Toast
 
 private fun formatClose(v: Double): String = String.format("%.2f", v)
 
@@ -123,6 +129,13 @@ fun MyttScreen(
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    // 🐉 双龙出水独立表格: 任意两次万龙信号间隔≤90天的股票单独成表(不要求是否今天)。
+                    // 置于可滚动列表首项: 支持任意行数, 行多时可滚动查看, 不会挤爆屏幕或顶掉按钮。
+                    if ((state.stats?.totalSignals ?: 0) > 0) {
+                        item(key = "double_dragon") {
+                            DoubleDragonCard(items = state.doubleDragonItems, onStockClick = onStockClick)
+                        }
+                    }
                     items(state.dayResults, key = { it.date }) { day ->
                         WanlongDayCard(day, onStockClick = onStockClick)
                     }
@@ -130,6 +143,175 @@ fun MyttScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * 🐉 双龙出水独立表格: 同一股票任意两次万龙信号间隔 ≤90 天(不要求是否今天, 历史信号同样计入)。
+ * 双龙先后出水代表庄家试盘明显、近期有动作 —— 宜择机进场;
+ * 信号可靠性显著高于单次触发, 因此在页面顶部单独成表呈现, 并支持一键全部加入自选。
+ */
+@Composable
+private fun DoubleDragonCard(
+    items: List<DoubleDragonItem>,
+    onStockClick: (code: String, name: String) -> Unit
+) {
+    val context = LocalContext.current
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF7ED)),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            // 标题行: 双龙出水 + 只数 + 一键全部加入自选(空态时隐藏按钮)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("🐉 双龙出水", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFFC2410C))
+                    Spacer(Modifier.width(4.dp))
+                    Text("${items.size}只", fontSize = 11.sp, color = Color(0xFF9A3412))
+                }
+                if (items.isNotEmpty()) {
+                    Surface(
+                        color = Color(0xFFEA580C),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.clickable {
+                            val added = WatchlistStore.addAll(context, items.map { it.code to it.name })
+                            val msg = if (added > 0) "已将 $added 只双龙出水加入自选" else "双龙出水股票均已在本页自选中"
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                        }
+                    ) {
+                        Text(
+                            "＋ 全部自选",
+                            fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+            }
+
+            Text("庄家试盘明显 · 近期有动作 · 择机进场 —— 任意两次万龙信号间隔 ≤90 天即上榜(不限是否今天)", fontSize = 10.sp, color = Color(0xFF9A3412))
+
+            Spacer(Modifier.height(6.dp))
+
+            if (items.isEmpty()) {
+                // 空态: 无二次命中股票时常驻提示, 而非整块消失
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFFFFEDD5), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("🌊", fontSize = 14.sp)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "暂无双龙出水股票 — 同一股票任意两次万龙信号间隔 ≤90 天即自动上榜(不限是否今天)",
+                        fontSize = 11.sp, color = Color(0xFF9A3412), lineHeight = 15.sp
+                    )
+                }
+            } else {
+                // 表格表头
+                DoubleDragonHeaderRow()
+                HorizontalDivider(Modifier.padding(vertical = 4.dp), color = Color(0xFFFED7AA))
+
+                // 表格行
+                items.forEachIndexed { index, item ->
+                    if (index > 0) {
+                        HorizontalDivider(Modifier.padding(vertical = 4.dp), color = Color(0xFFFFEDD5))
+                    }
+                    DoubleDragonRow(item, onStockClick = onStockClick)
+                }
+            }
+        }
+    }
+}
+
+/** 双龙出水表头: 股票 | 次数 | 信号日 | 最新价 | 次日 (与数据行列宽严格对齐)。 */
+@Composable
+private fun DoubleDragonHeaderRow() {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text("股票", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF9A3412), modifier = Modifier.weight(1.3f))
+        Text("次数", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF9A3412), modifier = Modifier.width(36.dp), textAlign = TextAlign.Center)
+        Text("信号日", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF9A3412), modifier = Modifier.weight(1.7f))
+        Text("最新价", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF9A3412), modifier = Modifier.width(48.dp), textAlign = TextAlign.End)
+        Text("次日", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFF9A3412), modifier = Modifier.width(48.dp), textAlign = TextAlign.End)
+    }
+}
+
+/** 双龙出水表格行: 名称/代码、次数徽章、信号日期、最新信号日收盘价、最近信号日 T+1 表现。 */
+@Composable
+private fun DoubleDragonRow(
+    item: DoubleDragonItem,
+    onStockClick: (code: String, name: String) -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable { onStockClick(item.code, item.name) }
+            .padding(vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // 列1 股票: 名称 + 代码
+        Column(Modifier.weight(1.3f)) {
+            Text(
+                item.name,
+                fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Blue700,
+                maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            Text(item.code, fontSize = 9.sp, color = Color.Gray)
+        }
+        // 列2 次数徽章
+        Box(Modifier.width(36.dp), contentAlignment = Alignment.Center) {
+            Surface(
+                color = if (item.hitCount >= 3) Color(0xFFDC2626) else Color(0xFFEA580C),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text(
+                    "${item.hitCount}次",
+                    fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+        }
+        // 列3 信号日(新→旧, 最多展示2个, 更多以 +N 折叠)
+        Row(
+            Modifier.weight(1.7f),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            item.dates.take(2).forEach { d ->
+                Text(
+                    d.takeLast(5),
+                    fontSize = 10.sp, color = Color(0xFF9A3412),
+                    modifier = Modifier.background(Color(0xFFFFEDD5), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp)
+                )
+            }
+            if (item.dates.size > 2) {
+                Text("+${item.dates.size - 2}", fontSize = 10.sp, color = Color.Gray)
+            }
+        }
+        // 列4 最新信号日收盘价
+        Text(
+            formatClose(item.lastClose),
+            fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.width(48.dp), textAlign = TextAlign.End
+        )
+        // 列5 最近信号日的次日(T+1)表现
+        val t1 = item.latestT1
+        Text(
+            t1?.let { formatPct(it) } ?: "—",
+            fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+            color = when {
+                t1 == null -> Color.Gray
+                t1 >= 0 -> Red600
+                else -> Green600
+            },
+            modifier = Modifier.width(48.dp), textAlign = TextAlign.End
+        )
     }
 }
 
