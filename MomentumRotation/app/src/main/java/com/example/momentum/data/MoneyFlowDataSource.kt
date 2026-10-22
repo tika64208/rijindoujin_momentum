@@ -21,9 +21,14 @@ object MoneyFlowDataSource {
      */
     data class FlowPoint(
         val date: String,        // yyyy-MM-dd
-        val mainNet: Double,     // 主力净流入(元)
-        val smallNet: Double,    // 小单净流入(元)
-        val mainRatio: Double    // 主力净流入占比(%)
+        val mainNet: Double,     // 主力净流入(元) f52 = 大单+超大单
+        val smallNet: Double,    // 小单净流入(元) f53
+        val midNet: Double,      // 中单净流入(元) f54
+        val bigNet: Double,      // 大单净流入(元) f55
+        val superNet: Double,    // 超大单净流入(元) f56
+        val mainRatio: Double,   // 主力净流入占比(%) f57
+        val close: Double,       // 收盘价 f62
+        val chgPct: Double       // 当日涨跌幅(%) f63
     )
 
     /**
@@ -54,7 +59,12 @@ object MoneyFlowDataSource {
                             date = parts[0],
                             mainNet = parts[1].toDoubleOrNull() ?: 0.0,
                             smallNet = parts[2].toDoubleOrNull() ?: 0.0,
-                            mainRatio = parts[6].toDoubleOrNull() ?: 0.0  // f57 主力净流入占比
+                            midNet = parts[3].toDoubleOrNull() ?: 0.0,
+                            bigNet = parts[4].toDoubleOrNull() ?: 0.0,
+                            superNet = parts[5].toDoubleOrNull() ?: 0.0,
+                            mainRatio = parts[6].toDoubleOrNull() ?: 0.0,  // f57 主力净流入占比
+                            close = parts[11].toDoubleOrNull() ?: 0.0,      // f62 收盘价
+                            chgPct = parts[12].toDoubleOrNull() ?: 0.0      // f63 当日涨跌幅
                         )
                     )
                 }

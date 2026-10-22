@@ -7,6 +7,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.material3.Surface
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
@@ -345,6 +349,9 @@ private fun MinuteChartCard(
     points: List<TencentDataSource.MinutePoint>,
     modifier: Modifier = Modifier
 ) {
+    // 十字光标: 选中的分时点索引(null=隐藏)
+    var crossIndex by remember(points) { mutableStateOf<Int?>(null) }
+
     Card(
         modifier = modifier,
         shape = RoundedCornerShape(12.dp),
@@ -379,23 +386,82 @@ private fun MinuteChartCard(
                     )
                 }
                 Spacer(Modifier.height(4.dp))
-                // 价格图(含均价线) + 成交量副图
-                Column(Modifier.fillMaxSize()) {
-                    PriceChart(points, Modifier.fillMaxWidth().weight(3f))
-                    VolumeChart(points, Modifier.fillMaxWidth().weight(1f))
+                // 价格图(含均价线) + 成交量副图, 十字光标联动
+                val localCross = crossIndex?.takeIf { it in points.indices }
+                Box(Modifier.fillMaxSize()) {
+                    Column(Modifier.fillMaxSize()) {
+                        PriceChart(
+                            points, localCross,
+                            Modifier.fillMaxWidth().weight(3f)
+                        ) { crossIndex = it }
+                        VolumeChart(points, localCross, Modifier.fillMaxWidth().weight(1f))
+                    }
+                    // 十字光标数据气泡
+                    if (localCross != null) {
+                        val p = points[localCross]
+                        val pBase = if (preClose > 0) preClose else points.first().price
+                        val pChg = if (pBase > 0) (p.price / pBase - 1.0) * 100 else 0.0
+                        val bubbleAtLeft = localCross > points.size / 2
+                        Surface(
+                            color = Color(0xCC1E293B),
+                            shape = RoundedCornerShape(6.dp),
+                            modifier = Modifier
+                                .align(if (bubbleAtLeft) Alignment.TopStart else Alignment.TopEnd)
+                                .padding(6.dp)
+                        ) {
+                            Column(Modifier.padding(horizontal = 8.dp, vertical = 5.dp)) {
+                                Text(p.time, fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                                Text(
+                                    "价 ${String.format("%.2f", p.price)}  ${String.format("%+.2f%%", pChg)}",
+                                    fontSize = 9.sp,
+                                    color = if (pChg >= 0) Color(0xFFFCA5A5) else Color(0xFF86EFAC)
+                                )
+                                Text(
+                                    "均价 ${String.format("%.2f", p.avgPrice)}  量 ${String.format("%.0f", p.volume)}",
+                                    fontSize = 9.sp, color = Color(0xFFE2E8F0)
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-/** 价格折线 + 均价线(黄) + 昨收线(灰)。 */
+/** 价格折线 + 均价线(黄) + 昨收线(灰) + 十字光标 + 标准时间轴。 */
 @Composable
-private fun PriceChart(points: List<TencentDataSource.MinutePoint>, modifier: Modifier) {
+private fun PriceChart(
+    points: List<TencentDataSource.MinutePoint>,
+    crossIndex: Int?,
+    modifier: Modifier,
+    onCross: (Int) -> Unit
+) {
+    var chartWpx by remember { mutableStateOf(1f) }
     Canvas(
         modifier = modifier
             .fillMaxWidth()
             .background(Color(0xFFFAFAFA))
+            .pointerInput(points.size) {
+                detectDragGestures(
+                    onDragStart = { off ->
+                        chartWpx = size.width.toFloat()
+                        val i = (off.x.coerceIn(0f, size.width.toFloat()) / size.width * (points.size - 1)).toInt()
+                        onCross(i)
+                    },
+                    onDrag = { change, _ ->
+                        change.consume()
+                        val i = (change.position.x.coerceIn(0f, size.width.toFloat()) / size.width * (points.size - 1)).toInt()
+                        onCross(i)
+                    }
+                )
+            }
+            .pointerInput(points.size) {
+                detectTapGestures { off ->
+                    val i = (off.x.coerceIn(0f, size.width.toFloat()) / size.width * (points.size - 1)).toInt()
+                    onCross(i)
+                }
+            }
     ) {
         val n = points.size
         if (n < 2) return@Canvas
@@ -404,12 +470,13 @@ private fun PriceChart(points: List<TencentDataSource.MinutePoint>, modifier: Mo
         val padLeft = 40.dp.toPx()
         val padRight = 8.dp.toPx()
         val padTop = 4.dp.toPx()
-        val padBottom = 4.dp.toPx()
+        val padBottom = 14.dp.toPx()
         val chartW = w - padLeft - padRight
         val chartH = h - padTop - padBottom
 
         val prices = points.map { it.price }
         val avgs = points.map { it.avgPrice }
+        val last = prices.last()
         val priceMin = prices.min()
         val priceMax = prices.max()
         val preClose = points.firstOrNull { it.preClose > 0 }?.preClose ?: 0.0
@@ -430,17 +497,33 @@ private fun PriceChart(points: List<TencentDataSource.MinutePoint>, modifier: Mo
         fun xTo(i: Int): Float = padLeft + chartW * (i.toFloat() / (n - 1))
         fun yTo(p: Double): Float = padTop + chartH * (1f - ((p.coerceIn(minP, maxP) - minP) / (maxP - minP)).toFloat())
 
-        // Y 轴刻度(3条, 左侧价格区间)
+        // 网格 + Y 轴刻度: 左侧价格, 右侧涨跌幅%(相对昨收)
         val gridLines = 3
         for (g in 0..gridLines) {
             val frac = g.toFloat() / gridLines
             val y = padTop + chartH * (1 - frac)
             val valAt = minP + (maxP - minP) * frac
+            drawLine(Color(0xFFE2E8F0), Offset(padLeft, y), Offset(w - padRight, y), 0.6f)
             drawContext.canvas.nativeCanvas.drawText(
                 String.format("%.2f", valAt),
                 padLeft - 4.dp.toPx(), y + 3.dp.toPx(),
                 Paint().apply { color = android.graphics.Color.GRAY; textSize = 8.sp.toPx(); textAlign = Paint.Align.RIGHT }
             )
+            if (refPrice > 0) {
+                val pct = (valAt / refPrice - 1) * 100
+                drawContext.canvas.nativeCanvas.drawText(
+                    String.format("%+.2f%%", pct),
+                    w - padRight + 2.dp.toPx(), y + 3.dp.toPx(),
+                    Paint().apply {
+                        color = when {
+                            pct > 0.01 -> android.graphics.Color.rgb(220, 38, 38)
+                            pct < -0.01 -> android.graphics.Color.rgb(22, 163, 74)
+                            else -> android.graphics.Color.GRAY
+                        }
+                        textSize = 7.sp.toPx(); textAlign = Paint.Align.LEFT
+                    }
+                )
+            }
         }
 
         // 昨收参考线(灰色虚线)
@@ -465,30 +548,62 @@ private fun PriceChart(points: List<TencentDataSource.MinutePoint>, modifier: Mo
         }
         drawPath(avgPath, Color(0xFFF59E0B), style = Stroke(width = 1.5.dp.toPx()))
 
-        // 价格线(蓝色)
+        // 价格线 + 昨收下方填充渐变蓝/上方红(分时经典效果: 价格面积图, 红涨绿跌)
         val path = Path()
         for (i in 0 until n) {
             val x = xTo(i)
             val y = yTo(points[i].price)
             if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
         }
-        drawPath(path, color = Blue700, style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round))
+        val lineColor = if (last >= refPrice) Color(0xFFDC2626) else Color(0xFF16A34A) 
+        drawPath(path, color = lineColor, style = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round))
+        // 价格与昨收盘之间的面积填充
+        val yRef = yTo(refPrice)
+        val fillPath = Path()
+        fillPath.moveTo(xTo(0), yRef)
+        for (i in 0 until n) {
+            fillPath.lineTo(xTo(i), yTo(points[i].price))
+        }
+        fillPath.lineTo(xTo(n - 1), yRef)
+        fillPath.close()
+        val fillAlpha = if (last >= refPrice) Color(0x14DC2626) else Color(0x1416A34A)
+        drawPath(fillPath, color = fillAlpha)
 
-        // X 轴时间
-        for (i in intArrayOf(0, n / 2, n - 1)) {
-            if (i < n) {
-                drawContext.canvas.nativeCanvas.drawText(
-                    points[i].time, xTo(i), h - 1.dp.toPx(),
-                    Paint().apply { color = android.graphics.Color.GRAY; textSize = 8.sp.toPx(); textAlign = Paint.Align.CENTER }
-                )
-            }
+        // X 轴标准时间轴(09:30 / 11:30 / 14:00 / 15:00 按比例定位)
+        val axisTimes = listOf("09:30", "11:30/13:00", "14:00", "15:00")
+        val axisPos = listOf(0f, 0.5f, 0.75f, 1f)  // 上午120分钟/全天240分钟
+        axisTimes.forEachIndexed { k, label ->
+            val x = padLeft + chartW * axisPos[k]
+            drawContext.canvas.nativeCanvas.drawText(
+                label, x, h - 2.dp.toPx(),
+                Paint().apply {
+                    color = android.graphics.Color.GRAY; textSize = 8.sp.toPx()
+                    textAlign = when (k) {
+                        0 -> Paint.Align.LEFT
+                        axisTimes.size - 1 -> Paint.Align.RIGHT
+                        else -> Paint.Align.CENTER
+                    }
+                }
+            )
+        }
+
+        // ===== 十字光标 =====
+        if (crossIndex != null && crossIndex in 0 until n) {
+            val cx = xTo(crossIndex)
+            val cy = yTo(points[crossIndex].price)
+            drawLine(Color(0xFF475569), Offset(cx, padTop), Offset(cx, h - padBottom), 1f)
+            drawLine(Color(0xFF475569), Offset(padLeft, cy), Offset(w - padRight, cy), 1f)
         }
     }
 }
 
-/** 成交量柱状副图。 */
+/** 成交量柱状副图(红涨绿跌 + 十字光标同步)。 */
 @Composable
-private fun VolumeChart(points: List<TencentDataSource.MinutePoint>, modifier: Modifier) {
+private fun VolumeChart(
+    points: List<TencentDataSource.MinutePoint>,
+    crossIndex: Int?,
+    modifier: Modifier
+) {
     Canvas(
         modifier = modifier
             .fillMaxWidth()
@@ -501,6 +616,7 @@ private fun VolumeChart(points: List<TencentDataSource.MinutePoint>, modifier: M
         val padLeft = 40.dp.toPx()
         val padRight = 8.dp.toPx()
         val chartW = w - padLeft - padRight
+        val refPrice = points.firstOrNull { it.preClose > 0 }?.preClose ?: points.first().price
 
         val maxVol = points.maxOf { it.volume }.coerceAtLeast(1.0)
         val barW = chartW / n * 0.7f
@@ -508,19 +624,17 @@ private fun VolumeChart(points: List<TencentDataSource.MinutePoint>, modifier: M
             val x = padLeft + chartW * (i.toFloat() / (n - 1))
             val v = points[i].volume
             val barH = (v / maxVol * (h - 4.dp.toPx())).toFloat()
-            val rise = points[i].price >= points[i].avgPrice
+            // 与价格线同色: 当前价高于昨收为红
+            val rise = points[i].price >= refPrice
             val color = if (rise) Color(0xFFDC2626) else Color(0xFF16A34A)
             drawLine(color, Offset(x, h), Offset(x, h - barH), barW)
         }
-        // 时间轴
-        drawContext.canvas.nativeCanvas.drawText(
-            points[0].time, padLeft, h - 1.dp.toPx(),
-            Paint().apply { color = android.graphics.Color.GRAY; textSize = 8.sp.toPx(); textAlign = Paint.Align.LEFT }
-        )
-        drawContext.canvas.nativeCanvas.drawText(
-            points[n - 1].time, w - padRight, h - 1.dp.toPx(),
-            Paint().apply { color = android.graphics.Color.GRAY; textSize = 8.sp.toPx(); textAlign = Paint.Align.RIGHT }
-        )
+
+        // 十字光标垂直线同步
+        if (crossIndex != null && crossIndex in 0 until n) {
+            val cx = padLeft + chartW * (crossIndex.toFloat() / (n - 1))
+            drawLine(Color(0xFF475569), Offset(cx, 0f), Offset(cx, h), 1f)
+        }
     }
 }
 
