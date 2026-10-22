@@ -14,7 +14,7 @@
 
 ---
 
-## 🚀 四大核心功能模块 (主 Tab 导航)
+## 🚀 五大核心功能模块 (主 Tab 导航)
 
 ### 1. 自选股与动量轮动 (`MomentumScreen`)
 - **风险调整动量模型 (Risk-Adjusted Momentum)**：
@@ -29,12 +29,15 @@
 - **大单与大宗交易监控**：实时追踪全市场大额暗盘交易与主力隐秘买卖行为。
 - **智能研判引擎 (`DarkTradeAnalyzer`)**：解析个股主力净流向、连续净买入/净卖出天数；自动识别超近期均值 3 倍以上的异常放量吸筹信号。
 
-### 3. MYTT 通达信/麦语言量化选股 (`MyttScreen`)
+### 3. MYTT 万龙选股 (`MyttScreen`)
 - **纯 Kotlin 通达信公式虚拟机 (`Talc.kt`)**：不依赖通达信客户端，原生实现了 `MA`、`EMA`、`SMA`、`REF`、`CROSS`、`BARSLAST`、`HHV`、`LLV` 等经典技术分析函数。
 - **策略模型 (`MyttEngine.kt`)**：
   - **万手单策略**：捕捉主力异常大单建仓异动。
   - **寻龙诀 4 号策略**：趋势放量主升起爆模型。
-  - **双共振选股**：万手单与寻龙诀 4 号信号在窗口期内同时触发，全市场量化扫描。
+  - **万龙双共振选股**：万手单与寻龙诀 4 号同日同时触发，基于每日涨停池候选全市场扫描。
+- **信号永久沉淀 (`wanlong_hits` Room 表)**：每条万龙信号落库保存，滚动计算 T+1/T+2/T+3 后验收益与整体胜率看板；涨停池回溯 90 天、K 线缓存 400 根（保证 90 日窗口内最旧信号日仍有 ≥300 根可计算）。
+- **🐉 双龙出水独立看板**：同一股票历史上**任意两次万龙信号间隔 ≤90 天**即上榜（不要求是否今天，历史沉淀信号同样计入），独立表格展示信号次数徽章、信号日、最新价与次日表现，支持「一键全部自选」。
+- **120 天历史深度回算管线**：涨停池接口仅保留约 28 天历史，配套本地 Python 回算流程（全 A 5576 只 → 120 天内单日涨幅 >9.5% 候选 3090 只 → 400 根 K 线逐日引擎回算）可把信号账本一次性回补至 120 天深度（产物：`backfill_120d_candidates.csv` / `backfill_120d_signals.csv`）。
 
 ### 4. 早盘集合竞价量化系统 (`BidAnalysisScreen` V3.2)
 - **聚焦 9:15 - 9:25 早盘集合竞价**：实时捕捉主力抢筹与异动特征。
@@ -44,7 +47,10 @@
 
 ### 5. 个股全维度深度穿透 (`StockDetailScreen`)
 - **分时走势对照**：叠加对应大盘指数（上证/深证/创业板/科创50）走势基准。
-- **技术指标图**：日 K 线与均线系统、MACD 动态指标（DIF/DEA/红绿柱）。
+- **吞金起爆主图指标体系 (`KLineChart.kt`)**：日 K 主图 1:1 移植通达信「吞金起爆」全套公式——吞金起爆线（MA20 上浮 18/1000.35）、主力攻击线（MA3/6/9 复合，CONF 成立段红色加粗）、吞金杀牛线（MA5~30 复合）、走强线（EMA(COST(99),181) 筹码近似模型，虚线）、DX 动向「卖」/「★」买卖点、庄进/庄出三条件信号、大跌日深绿 STICKLINE、起爆日红三角。
+- **🐉 万龙信号日标记**：日 K 图自动标出该股全部历史万龙信号日（蜡烛上方 🐉 + 橙色竖线，十字光标气泡同步提示），与起爆三角、买卖信号同屏共振。
+- **本地缓存兜底**：腾讯/东财日 K 接口限流时自动回退 Room 本地缓存 K 线（400 根），图表与标记永不因网络受限失效。
+- **技术指标图**：MACD 动态指标（DIF/DEA/红绿柱）。
 - **资金流向拆解**：超大单、大单、中单、小单主力净流入动态图。
 - **行业板块联动**：展示同花顺所属行业与概念板块走势。
 
@@ -90,11 +96,13 @@ rijijndojin/
 │   │   │   │   └── HttpExecutor.kt    # 统一 HTTP 请求执行器（防爬伪装、Header 注入、容灾降级）
 │   │   │   ├── db/                    # Room 本地持久化缓存
 │   │   │   │   ├── AppDatabase.kt     # Room Database 定义
-│   │   │   │   ├── Entities.kt        # 数据库实体（DailyBarEntity, DarkTradeEntity, BidEntity）
+│   │   │   │   ├── Entities.kt        # 数据库实体（DailyBarEntity, DarkTradeEntity, BidEntity, WanlongHitEntity, CacheMetaEntity）
 │   │   │   │   ├── EntityMappers.kt   # Entity 与 Domain Model 转换映射
 │   │   │   │   ├── DailyBarDao.kt     # 日线 K 线 DAO
 │   │   │   │   ├── DarkTradeDao.kt    # 暗盘交易 DAO
-│   │   │   │   └── BidDao.kt          # 竞价分析数据 DAO
+│   │   │   │   ├── BidDao.kt          # 竞价分析数据 DAO
+│   │   │   │   └── WanlongDao.kt      # 万龙信号账本 DAO（wanlong_hits 永久沉淀, 按日/按股/全量查询）
+│   │   │   ├── WatchlistStore.kt      # 跨 Tab 共享自选池存取（双龙出水一键入自选 → 自选页自动同步）
 │   │   │   ├── TencentDataSource.kt   # 腾讯 ifzq 前复权日线与分时数据源
 │   │   │   ├── EastmoneyBidDataSource.kt # 东方财富 9:25 竞价数据源
 │   │   │   ├── DarkTradeDataSource.kt # 东方财富全量暗盘/大宗数据源
@@ -120,14 +128,14 @@ rijijndojin/
 │   │   │   │   ├── MomentumViewModel.kt
 │   │   │   │   ├── DarkTradeListScreen.kt # Tab 2: 全量暗盘列表页
 │   │   │   │   ├── DarkTradeListViewModel.kt
-│   │   │   │   ├── MyttScreen.kt          # Tab 3: MYTT 选股页
+│   │   │   │   ├── MyttScreen.kt          # Tab 3: 万龙选股页（双龙出水独立表格 + 后验统计）
 │   │   │   │   ├── MyttViewModel.kt
 │   │   │   │   ├── BidAnalysisScreen.kt   # Tab 4: 集合竞价分析页
 │   │   │   │   ├── BidAnalysisViewModel.kt
 │   │   │   │   ├── StockDetailScreen.kt   # 个股深度详情页
 │   │   │   │   ├── SettingsScreen.kt      # 参数设置与备份管理页
 │   │   │   │   ├── DownloadViewModel.kt   # 全局行情下载状态控制器
-│   │   │   │   ├── KLineChart.kt          # 日 K 线图绘制组件
+│   │   │   │   ├── KLineChart.kt          # 日 K 主图: 吞金起爆全套指标 + 万龙🐉标记 + 十字光标
 │   │   │   │   ├── MacdChart.kt           # MACD 趋势副图组件
 │   │   │   │   ├── MoneyFlowChart.kt      # 主力资金流向图组件
 │   │   │   │   ├── EquityCurvePanel.kt    # 回测权益曲线图板
@@ -149,7 +157,10 @@ rijijndojin/
 │       └── TencentDataSourceTest.kt
 │
 ├── mytt_selector/                 # [历史验证模块] MYTT 独立 Python 选股原型脚本
-└── mytt_android/                  # [历史验证模块] 早期独立轻量 APK 原型（已完整融合进主工程）
+├── mytt_android/                  # [历史验证模块] 早期独立轻量 APK 原型（已完整融合进主工程）
+│
+├── backfill_120d_candidates.csv   # [数据产物] 120天内出现过单日涨幅>9.5%的候选股票清单（3090只）
+└── backfill_120d_signals.csv      # [数据产物] 120天历史回算出的万龙双共振信号明细（261只/269条）
 ```
 
 ---
@@ -207,6 +218,16 @@ python3 verify_enhance.py
 | **后台调度** | Android Jetpack WorkManager | 周期性盘中监测与尾盘/开盘调仓推送通知 |
 | **公式引擎** | 纯 Kotlin 自研麦语言虚拟机 (`Talc`) | 移植通达信经典指标计算体系，支持任意复杂技术指标 |
 | **研究原型** | Python 3 + pandas + numpy + akshare | 算法原型设计、参数搜索与策略对照 |
+
+---
+
+## 🆕 近期更新 (2026-10-22)
+
+- **🐉 双龙出水**：万龙选股页新增独立表格——同一股票**任意两次万龙信号间隔 ≤90 天**即上榜（不要求是否今天，历史信号同样计入），含信号次数徽章、信号日、最新价、次日表现与「一键全部自选」；表格常驻显示（无命中显示空态），置入可滚动列表首项。
+- **万龙信号上日 K**：个股详情日 K 图自动标记该股全部历史信号日（蜡烛上方 🐉 + 橙色竖线 + 十字光标气泡提示）。
+- **吞金起爆主图指标**：通达信公式全套 1:1 移植（起爆线 / 攻击线含 CONF 红色加粗段 / 杀牛线 / 走强线 EMA(COST(99),181) 筹码近似 / DX 动向「卖」「★」买卖点 / 庄进庄出 / 大跌绿棒 / 起爆红三角），替换原 MA5/10/20 显示，与万龙标记同屏。
+- **信号账本深度回补**：K 线缓存 320→400 根、涨停池回溯 60→90 天；本地 Python 120 天回算管线一次性回补 225 条历史信号（账本 47→272 条，信号跨度回溯到 06-24），**8 只真实双龙出水上榜**（海洋王 08-13↔09-16 间隔 34 天等）。
+- **详情页图表本地兜底**：腾讯/东财日 K 接口限流时自动回退 Room 缓存（400 根），图表与标记永不空白。
 
 ---
 
