@@ -181,6 +181,10 @@ fun StockDetailScreen(
                     MoneyFlowDataSource.fetchFlow(code, 30)
                 }
                 moneyFlows = flows
+                if (flows.isEmpty()) {
+                    CrashLogManager.recordError("StockDetailScreen", "主力资金返回空(可能被东财限流)($code)")
+                }
+                moneyFlows = flows
             } catch (e: Exception) {
                 CrashLogManager.recordError("StockDetailScreen", "主力资金加载失败($code): ${e.message}", e)
             } finally {
