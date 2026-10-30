@@ -105,6 +105,12 @@ fun MyttScreen(
                 }
             }
 
+            Text(
+                "信号于北京时间15:05后确认；盘中运行仅统计此前已收盘日期。",
+                color = Color.Gray, fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
+            )
+
             state.error?.let {
                 Text("⚠ $it", color = Red600, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp))
             }

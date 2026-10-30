@@ -10,7 +10,8 @@ import com.example.momentum.data.db.AppDatabase
 import com.example.momentum.data.db.CacheMetaEntity
 import com.example.momentum.data.db.DailyBarEntity
 import com.example.momentum.data.db.WanlongHitEntity
-import com.example.momentum.engine.MyttEngine
+import com.example.momentum.engine.WanlongSignalEngine
+import com.example.momentum.model.DailyBar
 import com.example.momentum.model.Stock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -149,7 +150,10 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun scanByDay(): Triple<List<WanlongDayResult>, List<DoubleDragonItem>, WanlongStats?> {
-        val today = LocalDate.now().toString()
+        val scanTime = WanlongSignalEngine.now()
+        val marketToday = scanTime.toLocalDate()
+        val today = marketToday.toString()
+        val confirmedThrough = WanlongSignalEngine.lastConfirmedDate(scanTime)
         val nameMap = loadNameMap().toMutableMap()
         val candidateMap = mutableMapOf<String, String>() // code -> name
         val dateToCandidates = mutableMapOf<String, List<EastmoneyZtDataSource.ZtCandidate>>()
@@ -158,8 +162,8 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(currentDate = "检查涨停池与本地缓存...", candidateCount = 5, scannedCount = 0) }
 
         // 1. 获取近 90 个自然日内的交易日涨停池 (带本地持久化缓存; 池历史深度有限, 连续空 N 天停止)
-        val windowStart = LocalDate.now().minusDays(REPEAT_WINDOW_DAYS)
-        var cur = LocalDate.now()
+        val windowStart = marketToday.minusDays(REPEAT_WINDOW_DAYS)
+        var cur = confirmedThrough
         var daysBack = 0
         var emptyPoolStreak = 0
         while (cur.isAfter(windowStart) && daysBack < REPEAT_WINDOW_DAYS + 5 && emptyPoolStreak < MAX_EMPTY_POOL_STREAK) {
@@ -176,7 +180,7 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
                         nameMap[it.code] = it.name
                     }
                     _state.update { it.copy(scannedCount = recentDates.size) }
-                } else if (dStr != LocalDate.now().toString()) {
+                } else if (dStr != today) {
                     // 非今日且池为空: 可能是节假日或超出池接口历史深度
                     emptyPoolStreak++
                 }
@@ -189,28 +193,31 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
         if (recentDates.isEmpty()) {
             val allDbDates = database.dailyBarDao().getAllMeta().flatMap { meta ->
                 database.dailyBarDao().getBars(meta.symbol).takeLast(5).map { it.date }
-            }.filter { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
+            }.filter { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) && it <= confirmedThrough.toString() }
             recentDates.addAll(allDbDates.distinct().sortedDescending().take(5))
         }
 
         if (recentDates.isEmpty()) {
-            return Triple(emptyList<WanlongDayResult>(), emptyList<DoubleDragonItem>(), null)
+            return buildDayResultsAndStats(database.wanlongDao().getAll())
         }
 
-        // 2. 日线数据严格「存 DB，当日已更新则不重复下载」
+        // 2. 收盘后必须重新抓取一次，早盘抓取标记不能阻止收盘数据刷新。
         val uniqueCandidates = candidateMap.keys.toList()
         val neededToFetch = mutableListOf<String>()
 
         for (code in uniqueCandidates) {
             val symbol = Stock.toMarketPrefix(code)
             val meta = database.dailyBarDao().getMeta(symbol)
-            val isFresh = meta != null && meta.barCount >= TARGET_BAR_COUNT && meta.lastUpdateDate == today
+            val isFresh = WanlongSignalEngine.isCacheFresh(
+                meta?.lastUpdateDate, meta?.barCount ?: 0,
+                prefs.getString("confirmed_daily_$symbol", null), scanTime, TARGET_BAR_COUNT
+            )
             if (!isFresh) {
                 neededToFetch.add(code)
             }
         }
 
-        // 3. 极速 5 路并发增量补充 320 根 K 线
+        // 3. 5 路并发补充 400 根 K 线
         if (neededToFetch.isNotEmpty()) {
             _state.update { it.copy(currentDate = "极速同步缺失日线至本地DB...", candidateCount = neededToFetch.size, scannedCount = 0) }
 
@@ -239,6 +246,9 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
                                             barCount = database.dailyBarDao().countBars(symbol)
                                         )
                                     )
+                                    if (confirmedThrough == marketToday && bars.last().date == today) {
+                                        prefs.edit().putString("confirmed_daily_$symbol", today).apply()
+                                    }
                                 }
                             } catch (_: Exception) {}
 
@@ -255,7 +265,7 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
 
         // 4. 计算并持久化「万龙选股 (万手单 AND 寻龙诀4号)」结果
         val newEntitiesToInsert = mutableListOf<WanlongHitEntity>()
-        val timeNow = java.time.LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
+        val timeNow = scanTime.format(DateTimeFormatter.ofPattern("HH:mm:ss"))
 
         // 增量去重: 已入库的 (日期, 代码) 信号对跳过, 避免重复扫描与重复入库
         val existingPairs = database.wanlongDao().getAll()
@@ -283,23 +293,28 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
                     return@forEachIndexed
                 }
                 val symbol = Stock.toMarketPrefix(code)
+                val meta = database.dailyBarDao().getMeta(symbol)
+                // 抓取当天的尾部 K 线只有经收盘后刷新，才可入账；失败时保留已有历史结果。
+                if (meta == null || date > meta.lastUpdateDate ||
+                    (date == meta.lastUpdateDate && prefs.getString("confirmed_daily_$symbol", null) != date)) {
+                    _state.update { it.copy(scannedCount = idx + 1) }
+                    return@forEachIndexed
+                }
                 val bars = database.dailyBarDao().getBars(symbol)
-                    .filter { it.date <= date }
-                    .sortedBy { it.date }
+                    .map { DailyBar(it.date, it.open, it.high, it.low, it.close, it.volume) }
 
-                if (bars.size >= 300) {
-                    val result = computeOnDate(bars)
+                val evaluation = WanlongSignalEngine.evaluate(bars, date, scanTime)
+                if (evaluation != null) {
+                    val result = evaluation.result
                     // 仅保留万龙双共振信号！
-                    if (result != null && result.signal) {
-                        val prevClose = if (bars.size >= 2) bars[bars.size - 2].close else bars.last().close
-                        val chgPct = if (prevClose > 0) (bars.last().close - prevClose) / prevClose * 100.0 else 0.0
+                    if (result.signal) {
                         newEntitiesToInsert.add(
                             WanlongHitEntity(
                                 code = code,
-                                date = date,
+                                date = evaluation.date,
                                 name = name,
-                                close = bars.last().close,
-                                chgPct = chgPct,
+                                close = evaluation.close,
+                                chgPct = evaluation.chgPct,
                                 xlj4_7 = result.xlj4_7,
                                 savedAt = timeNow
                             )
@@ -457,7 +472,7 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun getOrFetchZtPool(dStr: String, date8: String): List<EastmoneyZtDataSource.ZtCandidate> {
-        val todayStr = LocalDate.now().toString()
+        val todayStr = WanlongSignalEngine.now().toLocalDate().toString()
         val cached = prefs.getString("zt_$date8", null)
         if (!cached.isNullOrBlank()) {
             return cached.split("\n").mapNotNull { line ->
@@ -472,18 +487,6 @@ class MyttViewModel(application: Application) : AndroidViewModel(application) {
             prefs.edit().putString("zt_$date8", sb.toString()).apply()
         }
         return pool
-    }
-
-    private fun computeOnDate(bars: List<DailyBarEntity>): MyttEngine.MyttResult? {
-        val close = DoubleArray(bars.size) { bars[it].close }
-        val open = DoubleArray(bars.size) { bars[it].open }
-        val high = DoubleArray(bars.size) { bars[it].high }
-        val low = DoubleArray(bars.size) { bars[it].low }
-        val volume = DoubleArray(bars.size) { bars[it].volume }
-        return try {
-            val recent = MyttEngine.computeRecent(close, open, high, low, volume, 1)
-            recent.lastOrNull()
-        } catch (_: Exception) { null }
     }
 
     private fun codeFromSymbol(s: String) = s.removePrefix("sh").removePrefix("sz").removePrefix("bj")
