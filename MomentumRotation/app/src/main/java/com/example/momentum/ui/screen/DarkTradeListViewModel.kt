@@ -5,6 +5,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.momentum.data.DarkTradeDataSource
 import com.example.momentum.data.DarkTradeRepository
+import com.example.momentum.data.DarkTradeDay
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -47,6 +49,7 @@ data class DarkTradeListState(
     val loading: Boolean = false,
     val loadingMore: Boolean = false,
     val error: String? = null,
+    val cacheNotice: String? = null,
     val date: String = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd")),
     val nextPage: Int = 1,
     val totalCount: Int = -1,
@@ -108,45 +111,53 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
 
     private var loadJob: Job? = null
     private var detailJob: Job? = null
-    private var saveJob: Job? = null
 
     /** 全量下载当日暗盘并存入 DB。 */
     fun refreshAndSave() {
         if (_state.value.loading) return
-        saveJob?.cancel()
-        _state.update { it.copy(loading = true, error = null) }
-        saveJob = viewModelScope.launch {
-            val result = repository.getDarkTradeRecords(_state.value.date, forceRefresh = true)
-            result.onSuccess { all ->
-                _state.update {
-                    it.copy(records = all, loading = false, totalCount = all.size, hasMore = false)
+        loadDate(_state.value.date, forceRefresh = true)
+    }
+
+    /** 先展示缓存，刷新或补齐只保留一个任务，旧日期结果不会覆盖新日期。 */
+    fun loadDate(date: String, forceRefresh: Boolean = false) {
+        loadJob?.cancel()
+        detailJob?.cancel()
+        _state.update {
+            if (it.date == date) it.copy(loading = true, error = null, expandedCode = null, detail = null)
+            else DarkTradeListState(date = date, loading = true)
+        }
+        loadJob = viewModelScope.launch {
+            try {
+                val cached = repository.history.readCachedDay(date)
+                if (cached != null) showDay(cached, loading = true)
+                // 老版本没有下载完整性标记；可继续查看，避免升级后自动重下所有旧缓存。
+                if (!forceRefresh && cached != null && cached.fetchedAt == 0L) {
+                    showDay(cached, loading = false)
+                    return@launch
                 }
-            }.onFailure { err ->
-                _state.update { it.copy(loading = false, error = "暗盘下载失败: ${err.message}") }
+                val result = repository.history.loadDay(date, forceRefresh)
+                result.onSuccess { showDay(it, loading = false) }.onFailure { err ->
+                    repository.history.readCachedDay(date)?.let { showDay(it, loading = false) }
+                    _state.update { it.copy(loading = false, error = "暗盘下载失败: ${err.message}") }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(loading = false, error = "暗盘加载失败: ${e.message}") }
             }
         }
     }
 
-    /** 更换日期: 一次性全量拉取当日全部暗盘记录。 */
-    fun loadDate(date: String) {
-        loadJob?.cancel()
-        _state.update { DarkTradeListState(date = date, loading = true) }
-        loadJob = viewModelScope.launch {
-            val result = repository.getDarkTradeRecords(date, forceRefresh = false)
-            result.onSuccess { all ->
-                _state.update {
-                    it.copy(
-                        records = all,
-                        loading = false,
-                        totalCount = all.size,
-                        hasMore = false,
-                        error = null
-                    )
-                }
-            }.onFailure { err ->
-                _state.update { it.copy(loading = false, error = "加载失败: ${err.message}") }
+    private fun showDay(day: DarkTradeDay, loading: Boolean) {
+        _state.update { it.copy(
+            records = day.records, totalCount = day.records.size, hasMore = false, loading = loading,
+            cacheNotice = when {
+                day.fetchedAt == 0L -> "已显示已有数据；点击刷新可校验是否完整。"
+                !day.complete -> "仅显示部分数据；请刷新重试。"
+                day.records.isEmpty() -> "该日期已确认无数据。"
+                else -> null
             }
-        }
+        ) }
     }
 
     /** 加载下一页(已改为全量加载, 此方法保留为 no-op 以防 UI 仍引用)。 */
@@ -159,6 +170,7 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
      */
     fun toggleExpand(record: DarkTradeDataSource.DarkTradeRecord) {
         val s = _state.value
+        detailJob?.cancel()
         // 已展开同一只 → 收起
         if (s.expandedCode == record.code) {
             _state.update { it.copy(expandedCode = null, detail = null) }
@@ -166,7 +178,7 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
             return
         }
         // 先查内存缓存(当日已拉过一次就不再重拉)
-        val cached = repository.getCachedDetail(record.code)
+        val cached = repository.getCachedDetail(record)
         if (cached != null) {
             _state.update { it.copy(expandedCode = record.code, detail = cached.copy(loadingDetail = false)) }
             return
@@ -188,7 +200,7 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
         detailJob = viewModelScope.launch {
             val detail = repository.getStockDetail(record)
             _state.update {
-                if (it.expandedCode == record.code) {
+                if (it.date == s.date && it.expandedCode == record.code) {
                     it.copy(detail = detail)
                 } else it
             }
@@ -198,7 +210,6 @@ class DarkTradeListViewModel(application: Application) : AndroidViewModel(applic
     override fun onCleared() {
         loadJob?.cancel()
         detailJob?.cancel()
-        saveJob?.cancel()
         super.onCleared()
     }
 

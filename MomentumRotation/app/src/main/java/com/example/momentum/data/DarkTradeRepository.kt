@@ -2,14 +2,11 @@ package com.example.momentum.data
 
 import android.content.Context
 import com.example.momentum.data.db.AppDatabase
-import com.example.momentum.data.db.toEntity
-import com.example.momentum.data.db.toRecord
 import com.example.momentum.ui.screen.StockDetailData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.time.LocalDate
-import java.time.LocalTime
-import java.time.format.DateTimeFormatter
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -21,49 +18,12 @@ import java.util.concurrent.ConcurrentHashMap
  * - 统一暗盘数据流向，隔离 UI 与底层接口细节
  */
 class DarkTradeRepository(
-    private val database: AppDatabase,
-    private val darkTradeDataSource: DarkTradeDataSource = DarkTradeDataSource,
+    val history: DarkTradeHistoryRepository,
     private val mainFundDataSource: MainFundDataSource = MainFundDataSource,
     private val marginDataSource: MarginDataSource = MarginDataSource
 ) {
-    private val darkTradeDao get() = database.darkTradeDao()
-
-    // 展开详情内存缓存(code → StockDetailData), App 存活期间有效
-    private val detailCache = ConcurrentHashMap<String, StockDetailData>()
-
-    /**
-     * 获取指定日期的暗盘交易记录：
-     * 1. 若非强制刷新且本地 DB 有该日数据，优先读 DB；
-     * 2. 否则通过网络全量拉取，并回写至 DB 与内存。
-     */
-    suspend fun getDarkTradeRecords(
-        date: String,
-        forceRefresh: Boolean = false
-    ): Result<List<DarkTradeDataSource.DarkTradeRecord>> =
-        withContext(Dispatchers.IO) {
-            try {
-                if (!forceRefresh) {
-                    val dbEntities = darkTradeDao.getByDate(date)
-                    if (dbEntities.isNotEmpty()) {
-                        return@withContext Result.success(dbEntities.map { it.toRecord() })
-                    }
-                }
-
-                if (forceRefresh) {
-                    darkTradeDataSource.clearCache()
-                }
-
-                val remoteRecords = darkTradeDataSource.fetchAllDarkTrade(date)
-                if (remoteRecords.isNotEmpty()) {
-                    val savedAt = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss"))
-                    val entities = remoteRecords.map { it.toEntity(date, savedAt) }
-                    darkTradeDao.insertAll(entities)
-                }
-                Result.success(remoteRecords)
-            } catch (e: Exception) {
-                Result.failure(e)
-            }
-        }
+    private data class DetailEntry(val detail: StockDetailData, val fetchedAt: Long)
+    private val detailCache = ConcurrentHashMap<String, DetailEntry>()
 
     /**
      * 加载单只股票的展开详情（暗盘 + 主力资金流 + 两融）。
@@ -73,10 +33,13 @@ class DarkTradeRepository(
         record: DarkTradeDataSource.DarkTradeRecord
     ): StockDetailData =
         withContext(Dispatchers.IO) {
-            detailCache[record.code]?.let { return@withContext it }
+            val key = "${darkTradeDate(record.date)}:${record.code}"
+            getCachedDetail(record)?.let { return@withContext it }
 
             val fund = mainFundDataSource.fetchFundFlow(record.code)
+            currentCoroutineContext().ensureActive()
             val margin = marginDataSource.fetchMargin(record.code)
+            currentCoroutineContext().ensureActive()
 
             val detail = StockDetailData(
                 code = record.code,
@@ -97,20 +60,30 @@ class DarkTradeRepository(
                 marginBalance = margin.balance,
                 loadingDetail = false
             )
-            detailCache[record.code] = detail
+            detailCache[key] = DetailEntry(detail, System.currentTimeMillis())
             detail
         }
 
-    fun getCachedDetail(code: String): StockDetailData? = detailCache[code]
-
-    fun clearCache() {
-        detailCache.clear()
-        darkTradeDataSource.clearCache()
-    }
+    fun getCachedDetail(record: DarkTradeDataSource.DarkTradeRecord): StockDetailData? =
+        detailCache["${darkTradeDate(record.date)}:${record.code}"]
+            ?.takeIf { System.currentTimeMillis() - it.fetchedAt in 0 until 10 * 60 * 1000L }
+            ?.detail?.copy(
+            darkBuy = record.buyAmount, darkSell = record.sellAmount, darkNet = record.netAmount
+        )
 
     companion object {
+        @Volatile private var shared: DarkTradeRepository? = null
+
         fun create(context: Context): DarkTradeRepository {
-            return DarkTradeRepository(AppDatabase.get(context))
+            return shared ?: synchronized(this) {
+                shared ?: run {
+                    val database = AppDatabase.get(context.applicationContext)
+                    DarkTradeRepository(DarkTradeHistoryRepository(
+                        RoomDarkTradeHistoryStore(database.darkTradeDao()),
+                        download = { DarkTradeDataSource.downloadAll(it) }
+                    )).also { shared = it }
+                }
+            }
         }
     }
 }

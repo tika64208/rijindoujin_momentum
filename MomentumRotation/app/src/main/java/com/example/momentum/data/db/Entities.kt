@@ -1,6 +1,7 @@
 package com.example.momentum.data.db
 
 import androidx.room.Entity
+import androidx.room.Index
 import androidx.room.PrimaryKey
 import java.time.LocalDate
 
@@ -36,7 +37,7 @@ fun todayStr(): String = LocalDate.now().toString()
 /**
  * 暗盘数据快照(按 date 分组, 全量保存)。
  */
-@Entity(tableName = "dark_trade_data", primaryKeys = ["code", "date"])
+@Entity(tableName = "dark_trade_data", primaryKeys = ["code", "date"], indices = [Index("date")])
 data class DarkTradeDataEntity(
     val code: String,
     val date: String,
@@ -50,6 +51,15 @@ data class DarkTradeDataEntity(
     val volume: Double,
     val ratio: Double,
     val savedAt: String
+)
+
+/** 全市场逐日下载状态：空数据也可完整，旧版缓存无状态则保留为未验证。 */
+@Entity(tableName = "dark_trade_cache")
+data class DarkTradeCacheEntity(
+    @PrimaryKey val date: String,
+    val complete: Boolean,
+    val totalCount: Int,
+    val fetchedAt: Long
 )
 
 /**

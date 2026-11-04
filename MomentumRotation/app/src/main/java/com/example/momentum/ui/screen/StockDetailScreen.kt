@@ -28,7 +28,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.momentum.data.AStockDataSource
-import com.example.momentum.data.DarkTradeDataSource
+import com.example.momentum.data.DarkTradeHistory
+import com.example.momentum.data.DarkTradeRepository
 import com.example.momentum.data.MoneyFlowDataSource
 import com.example.momentum.data.TencentDataSource
 import com.example.momentum.data.db.AppDatabase
@@ -41,6 +42,7 @@ import com.example.momentum.ui.theme.*
 import com.example.momentum.util.CrashLogManager
 import com.example.momentum.util.FinanceFormatter
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import kotlin.math.roundToInt
 
 /**
@@ -55,7 +57,7 @@ fun StockDetailScreen(
     onOpenLogs: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val darkRepository = remember(context) { DarkTradeRepository.create(context).history }
     val symbol = remember(code) { Stock.toMarketPrefix(code) }
     val (benchSymbol, benchName) = remember(code) { TencentDataSource.getBenchmarkIndex(code) }
 
@@ -63,8 +65,9 @@ fun StockDetailScreen(
     var boardData by remember { mutableStateOf<List<TencentDataSource.MinutePoint>>(emptyList()) }
     var macdData by remember { mutableStateOf<List<MacdEngine.MacdPoint>>(emptyList()) }
     var boardMacdData by remember { mutableStateOf<List<MacdEngine.MacdPoint>>(emptyList()) }
-    var darkTrades by remember { mutableStateOf<List<DarkTradeDataSource.DarkTradeRecord>>(emptyList()) }
-    var darkLoading by remember { mutableStateOf(true) }
+    var darkHistory by remember(code) { mutableStateOf(DarkTradeHistory()) }
+    var darkLoading by remember(code) { mutableStateOf(true) }
+    var darkRequestId by remember(code) { mutableStateOf(0) }
     var moneyFlows by remember { mutableStateOf<List<MoneyFlowDataSource.FlowPoint>>(emptyList()) }
     var flowLoading by remember { mutableStateOf(true) }
     var bidHistory by remember { mutableStateOf<List<BidDataEntity>>(emptyList()) }
@@ -79,11 +82,13 @@ fun StockDetailScreen(
     LaunchedEffect(code, refreshTrigger) {
         loading = true
         errorNotice = null
-        scope.launch {
+        launch {
             try {
                 val stock = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     try {
                         TencentDataSource.fetchMinuteData(symbol)
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         CrashLogManager.recordError("StockDetailScreen", "个股分时加载失败($symbol): ${e.message}", e)
                         emptyList()
@@ -95,6 +100,8 @@ fun StockDetailScreen(
                 val bench = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     try {
                         TencentDataSource.fetchMinuteData(benchSymbol)
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         CrashLogManager.recordError("StockDetailScreen", "板块分时加载失败($benchSymbol): ${e.message}", e)
                         emptyList()
@@ -106,6 +113,8 @@ fun StockDetailScreen(
                 val bars = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     try {
                         TencentDataSource.fetchDailyBars(symbol, 252)
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         CrashLogManager.recordError(
                             "StockDetailScreen",
@@ -145,6 +154,8 @@ fun StockDetailScreen(
                 val boardBars = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     try {
                         TencentDataSource.fetchDailyBars(benchSymbol, 252)
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         CrashLogManager.recordError(
                             "StockDetailScreen",
@@ -155,6 +166,8 @@ fun StockDetailScreen(
                     }
                 }
                 boardMacdData = MacdEngine.compute(boardBars)
+            } catch (e: CancellationException) {
+                throw e
             } catch (t: Throwable) {
                 CrashLogManager.recordError(
                     "StockDetailScreen",
@@ -167,23 +180,8 @@ fun StockDetailScreen(
             }
         }
 
-        // 暗盘数据(近10日, 无数据日补零)
-        scope.launch {
-            darkLoading = true
-            try {
-                val records = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    DarkTradeDataSource.fetchRecent10Days(code)
-                }
-                darkTrades = records
-            } catch (e: Exception) {
-                CrashLogManager.recordError("StockDetailScreen", "暗盘数据加载失败($code): ${e.message}", e)
-            } finally {
-                darkLoading = false
-            }
-        }
-
         // 主力资金独立异步加载(单次请求, 限流防反爬)
-        scope.launch {
+        launch {
             kotlinx.coroutines.delay(800)  // 稍延迟, 避免与暗盘并发触发东财反爬
             flowLoading = true
             try {
@@ -195,6 +193,8 @@ fun StockDetailScreen(
                     CrashLogManager.recordError("StockDetailScreen", "主力资金返回空(可能被东财限流)($code)")
                 }
                 moneyFlows = flows
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 CrashLogManager.recordError("StockDetailScreen", "主力资金加载失败($code): ${e.message}", e)
             } finally {
@@ -203,7 +203,7 @@ fun StockDetailScreen(
         }
 
         // 竞价历史数据异步加载
-        scope.launch {
+        launch {
             bidLoading = true
             try {
                 val db = AppDatabase.get(context)
@@ -211,6 +211,8 @@ fun StockDetailScreen(
                     db.bidDao().getHistory(code, 30)
                 }
                 bidHistory = history
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 CrashLogManager.recordError("StockDetailScreen", "竞价数据加载失败($code): ${e.message}", e)
             } finally {
@@ -219,16 +221,36 @@ fun StockDetailScreen(
         }
 
         // 万龙信号历史异步加载(日K图🐉标记用, 来自本地永久信号库)
-        scope.launch {
+        launch {
             try {
                 val db = AppDatabase.get(context)
                 val hits = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                     db.wanlongDao().getByCode(code)
                 }
                 wanlongHits = hits
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 CrashLogManager.recordError("StockDetailScreen", "万龙信号加载失败($code): ${e.message}", e)
             }
+        }
+    }
+
+    // 打开详情只读缓存；补齐历史必须显式点击，切换股票/离开页面自动取消旧任务。
+    LaunchedEffect(code, darkRequestId, refreshTrigger) {
+        darkLoading = true
+        try {
+            darkHistory = darkRepository.readCachedHistory(code)
+            if (darkRequestId > 0) {
+                darkHistory = darkRepository.fillHistory(code) { darkHistory = it }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            darkHistory = darkHistory.copy(errors = mapOf("读取" to (e.message ?: "获取失败")))
+            CrashLogManager.recordError("StockDetailScreen", "暗盘数据加载失败($code): ${e.message}", e)
+        } finally {
+            darkLoading = false
         }
     }
 
@@ -248,125 +270,136 @@ fun StockDetailScreen(
         },
         containerColor = SurfaceBg
     ) { padding ->
-        if (loading) {
-            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(padding)
+                .padding(horizontal = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            if (loading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
-        } else {
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(padding)
-                    .padding(horizontal = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                // 异常提示横幅 (若接口失败或降级)
-                if (errorNotice != null) {
-                    Card(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFEF2F2)),
-                        shape = RoundedCornerShape(8.dp)
+            // 异常提示横幅 (若接口失败或降级)
+            if (errorNotice != null) {
+                Card(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFEF2F2)),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = errorNotice ?: "",
-                                color = Color(0xFFDC2626),
-                                fontSize = 12.sp,
-                                modifier = Modifier.weight(1f)
-                            )
-                            if (onOpenLogs != null) {
-                                TextButton(onClick = onOpenLogs) {
-                                    Text("查看日志", fontSize = 12.sp, color = Color(0xFFDC2626), fontWeight = FontWeight.Bold)
-                                }
+                        Text(
+                            text = errorNotice ?: "",
+                            color = Color(0xFFDC2626),
+                            fontSize = 12.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (onOpenLogs != null) {
+                            TextButton(onClick = onOpenLogs) {
+                                Text("查看日志", fontSize = 12.sp, color = Color(0xFFDC2626), fontWeight = FontWeight.Bold)
                             }
-                            TextButton(onClick = { refreshTrigger++ }) {
-                                Text("重试", fontSize = 12.sp, color = Blue700)
-                            }
+                        }
+                        TextButton(onClick = { refreshTrigger++ }) {
+                            Text("重试", fontSize = 12.sp, color = Blue700)
                         }
                     }
                 }
+            }
 
-                // 个股图表区(分时/日K可切换)
-                if (showKLine) {
-                    KLineChart(
-                        bars = dailyBars,
-                        signalDates = wanlongHits.map { it.date }.toSet(),
-                        modifier = Modifier.fillMaxWidth().height(240.dp)
-                    )
-                } else {
-                    MinuteChartCard(
-                        title = "$name 分时走势",
-                        points = stockData,
-                        modifier = Modifier.fillMaxWidth().height(220.dp)
-                    )
-                }
-                // 切换按钮
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                    androidx.compose.material3.FilterChip(
-                        selected = !showKLine,
-                        onClick = { showKLine = false },
-                        label = { Text("分时", fontSize = 11.sp) }
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    androidx.compose.material3.FilterChip(
-                        selected = showKLine,
-                        onClick = { showKLine = true },
-                        label = { Text("日K", fontSize = 11.sp) }
-                    )
-                }
-
-                // 个股 MACD 副图
-                MacdChart(
-                    points = macdData,
-                    modifier = Modifier.fillMaxWidth().height(160.dp)
+            // 个股图表区(分时/日K可切换)
+            if (showKLine) {
+                KLineChart(
+                    bars = dailyBars,
+                    signalDates = wanlongHits.map { it.date }.toSet(),
+                    modifier = Modifier.fillMaxWidth().height(240.dp)
                 )
-
-                // 板块指数分时图
+            } else {
                 MinuteChartCard(
-                    title = "$benchName 分时走势",
-                    points = boardData,
+                    title = "$name 分时走势",
+                    points = stockData,
                     modifier = Modifier.fillMaxWidth().height(220.dp)
                 )
-
-                // 板块 MACD 副图
-                MacdChart(
-                    points = boardMacdData,
-                    modifier = Modifier.fillMaxWidth().height(160.dp)
+            }
+            // 切换按钮
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                androidx.compose.material3.FilterChip(
+                    selected = !showKLine,
+                    onClick = { showKLine = false },
+                    label = { Text("分时", fontSize = 11.sp) }
                 )
+                Spacer(Modifier.width(6.dp))
+                androidx.compose.material3.FilterChip(
+                    selected = showKLine,
+                    onClick = { showKLine = true },
+                    label = { Text("日K", fontSize = 11.sp) }
+                )
+            }
 
-                // 主力资金直方图
-                if (flowLoading) {
-                    Text("加载主力资金…", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-                } else {
-                    MoneyFlowChart(
-                        flows = moneyFlows,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+            // 个股 MACD 副图
+            MacdChart(
+                points = macdData,
+                modifier = Modifier.fillMaxWidth().height(160.dp)
+            )
 
-                // 暗盘交易趋势图
-                if (darkLoading) {
-                    Text("加载暗盘数据…", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
-                } else {
-                    DarkTradeTrendChart(
-                        records = darkTrades,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+            // 板块指数分时图
+            MinuteChartCard(
+                title = "$benchName 分时走势",
+                points = boardData,
+                modifier = Modifier.fillMaxWidth().height(220.dp)
+            )
 
-                // 集合竞价分析与胜率卡片
-                BidDetailCard(
-                    bidHistory = bidHistory,
-                    loading = bidLoading,
+            // 板块 MACD 副图
+            MacdChart(
+                points = boardMacdData,
+                modifier = Modifier.fillMaxWidth().height(160.dp)
+            )
+
+            // 主力资金直方图
+            if (flowLoading) {
+                Text("加载主力资金…", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            } else {
+                MoneyFlowChart(
+                    flows = moneyFlows,
                     modifier = Modifier.fillMaxWidth()
                 )
-
-                Spacer(Modifier.height(12.dp))
             }
+
+            // 暗盘交易趋势图
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "已有${darkHistory.records.map { it.date }.distinct().size}/${darkHistory.totalDays}日" +
+                        if (darkHistory.pendingDates.isNotEmpty()) "，${darkHistory.pendingDates.size}日待补齐或更新" else "",
+                    fontSize = 12.sp, color = Color.Gray, modifier = Modifier.weight(1f)
+                )
+                TextButton(onClick = { darkRequestId++ }, enabled = !darkLoading) {
+                    Text(if (darkLoading) "加载中…" else "补齐/更新近10日", fontSize = 12.sp)
+                }
+            }
+            if (darkLoading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            if (darkHistory.errors.isNotEmpty()) {
+                Text("部分日期获取失败，已保留已有数据，可点击重试。", fontSize = 12.sp, color = Red600)
+            }
+            DarkTradeTrendChart(
+                records = darkHistory.records,
+                showAnalysis = darkHistory.pendingDates.isEmpty() && darkHistory.errors.isEmpty(),
+                emptyMessage = "尚未加载暗盘历史，请点击补齐近10日。",
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            // 集合竞价分析与胜率卡片
+            BidDetailCard(
+                bidHistory = bidHistory,
+                loading = bidLoading,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(Modifier.height(12.dp))
         }
     }
 }

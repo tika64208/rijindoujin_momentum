@@ -47,7 +47,9 @@ private val Fall = Color(0xFF16A34A)
 @Composable
 fun DarkTradeTrendChart(
     records: List<DarkTradeDataSource.DarkTradeRecord>,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    showAnalysis: Boolean = true,
+    emptyMessage: String = "近期无暗盘交易"
 ) {
     Card(
         modifier = modifier,
@@ -58,7 +60,7 @@ fun DarkTradeTrendChart(
             Text("暗盘交易趋势(近10日)", fontWeight = FontWeight.Bold, color = Blue700, fontSize = 15.sp)
             Spacer(Modifier.height(6.dp))
             if (records.isEmpty()) {
-                Text("近期无暗盘交易", fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(vertical = 20.dp))
+                Text(emptyMessage, fontSize = 12.sp, color = Color.Gray, modifier = Modifier.padding(vertical = 20.dp))
             } else {
                 val sorted = records.sortedBy { it.date }
                 var cross by remember(records) { mutableStateOf<Int?>(null) }
@@ -211,7 +213,7 @@ fun DarkTradeTrendChart(
 
                 // 自动分析结论
                 Spacer(Modifier.height(8.dp))
-                val conclusion = com.example.momentum.engine.DarkTradeAnalyzer.analyze(records)
+                val conclusion = if (showAnalysis) com.example.momentum.engine.DarkTradeAnalyzer.analyze(records) else null
                 if (conclusion != null) {
                     val text = com.example.momentum.engine.DarkTradeAnalyzer.toText(conclusion)
                     val bg = if (conclusion.todayNet > 0) Color(0xFFDCFCE7)

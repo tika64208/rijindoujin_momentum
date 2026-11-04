@@ -96,15 +96,23 @@ fun DarkTradeListScreen(
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
             }
 
+            state.cacheNotice?.let { notice ->
+                Text(notice, color = Color.Gray, fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+            }
+            if (state.loading && state.records.isNotEmpty()) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+
             when {
-                state.loading -> {
+                state.loading && state.records.isEmpty() -> {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator()
                     }
                 }
                 state.records.isEmpty() -> {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("当日暂无暗盘数据", color = Color.Gray, fontSize = 14.sp)
+                        Text(if (state.error != null) "数据尚未获取成功" else "该日期暂无暗盘数据", color = Color.Gray, fontSize = 14.sp)
                     }
                 }
                 else -> {

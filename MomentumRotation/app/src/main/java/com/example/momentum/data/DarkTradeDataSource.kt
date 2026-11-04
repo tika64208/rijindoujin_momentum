@@ -2,9 +2,9 @@ package com.example.momentum.data
 
 import com.example.momentum.data.net.HttpExecutor
 import org.json.JSONObject
-import java.time.LocalDate
-import java.time.format.DateTimeFormatter
-import java.util.HashMap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
  * 东方财富暗盘(大宗/场外)交易数据源。
@@ -14,20 +14,6 @@ import java.util.HashMap
  * 该子域未被反爬(与 push2.eastmoney.com 行情子域不同)。
  */
 object DarkTradeDataSource {
-
-    private const val UA =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-
-
-    /**
-     * 内存级缓存: date(yyyyMMdd) → 当天全市场暗盘列表。
-     * App 存活期间有效, 避免反复翻页拉全量。
-     */
-    private val cacheByDate = HashMap<String, List<DarkTradeRecord>>()
-
-    /** 清空缓存(日期切换/手动刷新时调用)。 */
-    fun clearCache() { cacheByDate.clear() }
 
     /** 一笔暗盘交易记录(东财 quotederivates darktrade 接口)。
      *
@@ -109,13 +95,15 @@ object DarkTradeDataSource {
     data class DarkTradePage(
         val records: List<DarkTradeRecord>,
         val totalCount: Int,
-        val page: Int
+        val page: Int,
+        val error: String? = null
     )
 
     fun fetchAllDarkTradePage(date: String, page: Int, pageSize: Int = 50): DarkTradePage {
         val ts = System.currentTimeMillis()
         val url = "https://quotederivates.eastmoney.com/datacenter/darktrade" +
-            "?version=100&date=$date&NumPerPage=$pageSize&sortflag=6&desc=1&market=0" +
+            // 全量下载使用默认顺序；按盘中买卖金额排序会在翻页时重排或产生大量同值页。
+            "?version=100&date=$date&NumPerPage=$pageSize&sortflag=0&desc=0&market=0" +
             "&label=%E4%B8%AA%E8%82%A1&StartPage=$page&cb=cb&_=$ts"
 
         return try {
@@ -124,6 +112,9 @@ object DarkTradeDataSource {
             val end = text.lastIndexOf(')')
             if (start < 0 || end <= start) return DarkTradePage(emptyList(), -1, page)
             val json = JSONObject(text.substring(start + 1, end))
+            if (json.optString("1") != date) {
+                return DarkTradePage(emptyList(), -1, page, "接口返回日期与请求日期不一致")
+            }
             val totalCount = json.optInt("2", -1)
             val dataArr = json.optJSONArray("data") ?: return DarkTradePage(emptyList(), totalCount, page)
             val records = ArrayList<DarkTradeRecord>(dataArr.length())
@@ -147,162 +138,17 @@ object DarkTradeDataSource {
             }
             DarkTradePage(records, totalCount, page)
         } catch (e: Exception) {
-            DarkTradePage(emptyList(), -1, page)
+            DarkTradePage(emptyList(), -1, page, e.message ?: "网络或解析失败")
         }
     }
 
-    /**
-     * 一次性拉取某日全市场暗盘的全部记录(自动翻页到完)。
-     * 翻页途中若遇空页(反爬/限流)会重试, 而不是提前中断。
-     * @param date yyyyMMdd
-     */
-    fun fetchAllDarkTrade(date: String): List<DarkTradeRecord> {
-        // 缓存命中直接返回
-        cacheByDate[date]?.let { if (it.isNotEmpty()) return it }
-        val result = ArrayList<DarkTradeRecord>()
-        var page = 1
-        var emptyStreak = 0
-        var totalPages = Int.MAX_VALUE
-
-        while (page <= totalPages) {
-            val p = fetchAllDarkTradePage(date, page)
-
-            if (p.records.isEmpty()) {
-                // 空页: 连续空页计数, 超过阈值才放弃(容忍偶发限流)
-                emptyStreak++
-                if (emptyStreak >= 3) break
-                page++
-                continue
-            }
-
-            emptyStreak = 0
-            result.addAll(p.records)
-
-            // 首次拿到总数时, 推算总页数(每页50)
-            if (totalPages == Int.MAX_VALUE && p.totalCount > 0) {
-                totalPages = (p.totalCount + 49) / 50  // 向上取整
-            }
-            // 已拿满总数则结束
-            if (p.totalCount > 0 && result.size >= p.totalCount) break
-            page++
-            if (page > 250) break
-            // 页间延迟: 降低东财反爬风险
-            try { Thread.sleep(120) } catch (_: InterruptedException) {}
-        }
-        if (result.isNotEmpty()) cacheByDate[date] = result
-        return result
-    }
-
-    /**
-     * 查询近 N 天的暗盘交易记录(逐日查询, 只保留有数据的日期)。
-     * @param days 回看天数
-     */
-    fun fetchHistory(code: String, days: Int = 60): List<DarkTradeRecord> {
-        val result = ArrayList<DarkTradeRecord>()
-        val today = LocalDate.now()
-        for (offset in 0..days) {
-            val d = today.minusDays(offset.toLong())
-            val dateStr = d.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
-            val records = fetchDarkTrade(code, dateStr)
-            if (records.isNotEmpty()) {
-                result.addAll(records)
-            }
-        }
-        return result
-    }
-
-    /**
-     * 从某日全市场暗盘列表中找出目标股票的记录(不传 code 接口, 规避沪市 code 查不到的怪癖)。
-     *
-     * 翻页直到命中目标 code 即返回(单日全市场约 107 页, 但目标股通常靠前一页就能命中);
-     * 翻满仍未命中则返回空。
-     *
-     * @param code 6位代码
-     * @param date yyyyMMdd
-     * @param maxPages 最多翻多少页(防单股请求无限放大, 默认 30)
-     */
-    fun fetchDarkTradeByCode(code: String, date: String, maxPages: Int = 120): List<DarkTradeRecord> {
-        // 优先从缓存拿(缓存当日全量, 本地过滤秒出)
-        val cached = cacheByDate[date]
-        if (cached != null && cached.isNotEmpty()) {
-            return cached.filter { it.code == code }
-        }
-        // 缓存miss: 全量翻页拉取并回写缓存
-        val all = fetchAllDarkTrade(date)
-        if (all.isNotEmpty()) {
-            cacheByDate[date] = all
-            return all.filter { it.code == code }
-        }
-        // 全量拉取失败: 逐页翻找(退化)
-        var page = 1
-        var emptyStreak = 0
-        while (page <= maxPages) {
-            val p = fetchAllDarkTradePage(date, page)
-            if (p.records.isEmpty()) {
-                emptyStreak++
-                if (emptyStreak >= 5) return emptyList()
-                page++
-                continue
-            }
-            emptyStreak = 0
-            val hit = p.records.filter { it.code == code }
-            if (hit.isNotEmpty()) return hit
-            // 已拿满当日总数仍未命中
-            if (p.totalCount > 0 && (page * 50) >= p.totalCount) return emptyList()
-            page++
-        }
-        return emptyList()
-    }
-
-    /**
-     * 用全市场接口 + 本地过滤, 查询近 N 日目标股票的暗盘记录。
-     * 相比 fetchHistory(单股 code 接口, 沪市会空), 本方法沪市深市都能查到; 且跳过周末。
-     * @param days 回看自然日天数(内部跳过周六日)
-     */
-    fun fetchHistoryByCode(code: String, days: Int = 60): List<DarkTradeRecord> {
-        val result = ArrayList<DarkTradeRecord>()
-        val today = LocalDate.now()
-        for (offset in 0..days) {
-            val d = today.minusDays(offset.toLong())
-            // 跳过周末(暗盘仅交易日有数据)
-            val dow = d.dayOfWeek
-            if (dow == java.time.DayOfWeek.SATURDAY || dow == java.time.DayOfWeek.SUNDAY) continue
-            val dateStr = d.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
-            result.addAll(fetchDarkTradeByCode(code, dateStr))
-        }
-        return result
-    }
-
-    /**
-     * 查询最近10个交易日的暗盘记录(无数据的日期补 netAmount=0, 用于图表绘制)。
-     * @param code 6位代码
-     */
-    fun fetchRecent10Days(code: String): List<DarkTradeRecord> {
-        val result = ArrayList<DarkTradeRecord>()
-        var d = LocalDate.now()
-        var count = 0
-        while (count < 10) {
-            // 跳过周末
-            val dow = d.dayOfWeek
-            if (dow != java.time.DayOfWeek.SATURDAY && dow != java.time.DayOfWeek.SUNDAY) {
-                val dateStr = d.format(DateTimeFormatter.ofPattern("yyyyMMdd"))
-                val records = fetchDarkTradeByCode(code, dateStr)
-                if (records.isNotEmpty()) {
-                    result.addAll(records)
-                } else {
-                    // 无数据: 补一条 totalAmount=0 的虚记录
-                    result.add(DarkTradeRecord(
-                        date = formattedDate(dateStr),
-                        attr = "", code = code, name = "", industry = "", concept = "",
-                        buyAmount = 0.0, sellAmount = 0.0, totalAmount = 0.0,
-                        volume = 0.0, ratio = 0.0
-                    ))
-                }
-                count++
-            }
-            d = d.minusDays(1)
-        }
-        return result
+    /** 完整性由分页器校验，失败保留部分结果但不伪装成全量成功。 */
+    suspend fun downloadAll(date: String): DarkTradeDownload = withContext(Dispatchers.IO) {
+        val key = darkTradeDate(date)
+        DarkTradePaginator().download(
+            fetchPage = { page -> fetchAllDarkTradePage(key, page) },
+            pause = { delay(150) }
+        )
     }
 
     private fun formattedDate(yyyymmdd: String): String {
