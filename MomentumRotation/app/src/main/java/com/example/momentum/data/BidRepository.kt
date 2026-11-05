@@ -18,6 +18,14 @@ import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 
 /**
+ * 竞价列表的行密度。
+ * - DETAIL：两行 + 一行时点/状态/理由/评分拆解
+ * - COMPACT：两行（名称 / 代码）
+ * - ULTRA：一行（名称与代码并排），最大信息密度
+ */
+enum class BidRowDensity { DETAIL, COMPACT, ULTRA }
+
+/**
  * 竞价分析数据仓库。
  *
  * 职责：
@@ -255,6 +263,22 @@ class BidRepository(
             .putStringSet("locked_codes_$today", codes)
             .putBoolean("is_locked_$today", codes.isNotEmpty())
             .apply()
+    }
+
+    /**
+     * 列表行密度：DETAIL=两行+时点/理由/拆解，COMPACT=两行，ULTRA=名称与代码并成一行。
+     * 存在同一份 prefs 里，重启后保持用户上次的选择；旧键 compactRows 自动升级。
+     */
+    fun loadRowDensity(): BidRowDensity {
+        val saved = prefs.getString("rowDensity", null)
+        if (saved != null) {
+            return runCatching { BidRowDensity.valueOf(saved) }.getOrDefault(BidRowDensity.DETAIL)
+        }
+        return if (prefs.getBoolean("compactRows", false)) BidRowDensity.COMPACT else BidRowDensity.DETAIL
+    }
+
+    fun saveRowDensity(density: BidRowDensity) {
+        prefs.edit().putString("rowDensity", density.name).apply()
     }
 
     /**

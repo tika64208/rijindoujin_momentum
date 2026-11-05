@@ -57,6 +57,16 @@ object FinanceFormatter {
     }
 
     /**
+     * 与 [formatMarketCap] 同口径，但不带“亿”后缀——单位由表头统一给出。
+     * 如: 46.5 / 480 / -
+     */
+    fun formatMarketCapValue(circMv: Double): String {
+        val yi = circMv / 100_000_000.0
+        if (yi <= 0) return "-"
+        return if (yi >= 1000) String.format("%.0f", yi) else String.format("%.1f", yi)
+    }
+
+    /**
      * 格式化筛选参数输入值：
      * - 0.0 转为空字符串（展示“不限”占位）
      * - 整数转为无小数位字符串（如 55.0 -> "55"）

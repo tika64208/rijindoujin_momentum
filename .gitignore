@@ -30,3 +30,7 @@ venv/
 .dsh/
 .dsh-filess/
 screenshot_*.png
+
+# 本地构建产物(APK 不进仓库)
+dist/
+MomentumRotation/.kotlin/sessions/

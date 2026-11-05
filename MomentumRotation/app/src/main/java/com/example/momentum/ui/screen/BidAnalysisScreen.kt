@@ -10,6 +10,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.draw.drawWithContent
@@ -32,6 +35,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.momentum.data.OpeningBidTime
+import com.example.momentum.data.BidRowDensity
 import com.example.momentum.data.SimTradingManager
 import com.example.momentum.data.db.BidDataEntity
 import com.example.momentum.engine.BidStrategy
@@ -45,6 +50,44 @@ private fun formatPrice(v: Double): String = FinanceFormatter.formatPrice(v)
 private fun formatPct(v: Double): String = FinanceFormatter.formatPct(v)
 private fun formatMv(circMv: Double): String = FinanceFormatter.formatMarketCap(circMv)
 private fun formatFilterVal(v: Double): String = FinanceFormatter.formatFilterNumber(v)
+
+/** 该行行情时间(f124) 的时分秒；0 表示接口没给。 */
+private fun quoteClock(quoteAt: Long): String =
+    if (quoteAt <= 0) "--:--:--"
+    else java.time.Instant.ofEpochMilli(quoteAt).atZone(OpeningBidTime.zone)
+        .toLocalTime().toString().take(8)
+
+/** 逐行数据状态：时点缺失 / 非当日报价(停牌或缓存旧价) / 无成交 / 正常。 */
+private fun quoteStatus(quoteAt: Long, volume: Int): String {
+    if (quoteAt <= 0) return "时点缺失"
+    val day = java.time.Instant.ofEpochMilli(quoteAt).atZone(OpeningBidTime.zone).toLocalDate()
+    if (day != java.time.LocalDate.now()) return "非当日报价"
+    if (volume <= 0) return "无成交"
+    return "正常"
+}
+
+private fun quoteStatusColor(status: String): Color =
+    if (status == "正常") Color(0xFF64748B) else Color(0xFFB45309)
+
+/**
+ * 评分四项拆解文本，顺序与 BidStrategy.scoreParts 一致：竞价+涨幅+异动+量能。
+ * 各分项先取整，再把取整误差按小数部分从大到小补回，保证拆解之和等于总分，不会出现 "39 分拆出 38"。
+ */
+private fun scoreSplitText(result: BidStrategy.BidResult): String {
+    val parts = BidStrategy.scoreParts(result.item, result.bidVolume)
+    val floors = parts.map { kotlin.math.floor(it).toInt() }.toMutableList()
+    var remainder = result.score - floors.sum()
+    if (remainder > 0) {
+        val order = parts.indices.sortedByDescending { parts[it] - floors[it] }
+        var i = 0
+        while (remainder > 0 && i < order.size) {
+            floors[order[i]] += 1
+            remainder -= 1
+            i += 1
+        }
+    }
+    return floors.joinToString("+")
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -342,6 +385,34 @@ fun BidAnalysisScreen(
                                     )
                                 }
                             }
+                            Spacer(Modifier.width(6.dp))
+                            // 行密度切换：详细 → 简版 → 超紧凑 循环
+                            val densityLabel = when (state.rowDensity) {
+                                BidRowDensity.DETAIL -> "详细"
+                                BidRowDensity.COMPACT -> "简版"
+                                BidRowDensity.ULTRA -> "超紧凑"
+                            }
+                            Surface(
+                                color = if (state.rowDensity == BidRowDensity.DETAIL) Color(0xFFEFF6FF) else Color(0xFFF1F5F9),
+                                shape = RoundedCornerShape(12.dp),
+                                border = BorderStroke(1.dp, if (state.rowDensity == BidRowDensity.DETAIL) Color(0xFFBFDBFE) else Color(0xFFE2E8F0)),
+                                modifier = Modifier
+                                    .clickable { viewModel.cycleRowDensity() }
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .heightIn(min = 28.dp)
+                                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = densityLabel,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (state.rowDensity == BidRowDensity.DETAIL) Blue700 else Color(0xFF475569)
+                                    )
+                                }
+                            }
                         }
                         TextButton(
                             onClick = {
@@ -351,7 +422,7 @@ fun BidAnalysisScreen(
                             },
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
-                            Text("📥 导出完整数据(CSV)", fontSize = 12.sp, color = Blue700, fontWeight = FontWeight.SemiBold)
+                            Text("📥 导出CSV", fontSize = 12.sp, color = Blue700, fontWeight = FontWeight.SemiBold, maxLines = 1)
                         }
                     }
                 }
@@ -391,7 +462,7 @@ fun BidAnalysisScreen(
                     val display = state.displayResults
                     item { BidTableHeader(state, { viewModel.setSort(it) }) }
                     items(display, key = { it.item.code }) { result ->
-                        BidTableRow(result, onStockClick = onStockClick)
+                        BidTableRow(result, density = state.rowDensity, onStockClick = onStockClick)
                     }
                 }
             }
@@ -854,24 +925,43 @@ private fun BidTableHeader(state: BidAnalysisState, onSort: (BidSortField) -> Un
             .padding(horizontal = 6.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        HeaderCellBid("名称/代码", BidSortField.NAME, state, onSort, Modifier.weight(1.3f))
-        HeaderCellBid("股价", BidSortField.PRICE, state, onSort, Modifier.weight(0.9f))
-        HeaderCellBid("涨幅", BidSortField.REAL, state, onSort, Modifier.weight(0.85f))
-        HeaderCellBid("竞价", BidSortField.BID, state, onSort, Modifier.weight(0.85f))
-        HeaderCellBid("市值", BidSortField.MV, state, onSort, Modifier.weight(0.95f))
-        HeaderCellBid("概率", BidSortField.PROB, state, onSort, Modifier.weight(0.75f))
-        HeaderCellBid("可信", BidSortField.CONF, state, onSort, Modifier.weight(0.75f))
-        HeaderCellBid("评分", BidSortField.SCORE, state, onSort, Modifier.weight(0.65f))
+        HeaderCellBid("名称/代码", BidSortField.NAME, state, onSort, Modifier.weight(COL_WEIGHTS[0]))
+        HeaderCellBid("股价", BidSortField.PRICE, state, onSort, Modifier.weight(COL_WEIGHTS[1]))
+        HeaderCellBid("涨幅", BidSortField.REAL, state, onSort, Modifier.weight(COL_WEIGHTS[2]))
+        HeaderCellBid("竞价", BidSortField.BID, state, onSort, Modifier.weight(COL_WEIGHTS[3]))
+        HeaderCellBid("市值", BidSortField.MV, state, onSort, Modifier.weight(COL_WEIGHTS[4]), unit = "亿")
+        HeaderCellBid("概率", BidSortField.PROB, state, onSort, Modifier.weight(COL_WEIGHTS[5]), unit = "%")
+        // 超紧凑模式隐藏可信/评分两列，把宽度让给名称
+        if (state.rowDensity != BidRowDensity.ULTRA) {
+            HeaderCellBid("可信", BidSortField.CONF, state, onSort, Modifier.weight(COL_WEIGHTS[6]))
+            HeaderCellBid("评分", BidSortField.SCORE, state, onSort, Modifier.weight(COL_WEIGHTS[7]))
+        }
     }
 }
 
+/** 八列权重，表头与数据行必须共用，否则列会错位。名称列留宽以容纳超紧凑模式下"名称+代码"同行。 */
+private val COL_WEIGHTS = listOf(1.55f, 0.82f, 0.80f, 0.80f, 0.92f, 0.80f, 0.68f, 0.62f)
+
 @Composable
-private fun HeaderCellBid(label: String, field: BidSortField, state: BidAnalysisState, onSort: (BidSortField) -> Unit, modifier: Modifier) {
+private fun HeaderCellBid(
+    label: String,
+    field: BidSortField,
+    state: BidAnalysisState,
+    onSort: (BidSortField) -> Unit,
+    modifier: Modifier,
+    unit: String? = null
+) {
     val active = state.sortField == field
     val arrow = if (active) (if (state.sortAscending) "▲" else "▼") else ""
     Row(modifier = modifier.clickable { onSort(field) }, verticalAlignment = Alignment.CenterVertically) {
         Text(label, fontSize = 11.sp, color = if (active) Blue700 else Color.Gray,
-            fontWeight = if (active) FontWeight.Bold else FontWeight.SemiBold)
+            fontWeight = if (active) FontWeight.Bold else FontWeight.SemiBold,
+            maxLines = 1, softWrap = false)
+        if (unit != null) {
+            // 单位跟表头走，单元格只放数值
+            Text(unit, fontSize = 8.sp, color = if (active) Blue700 else Color.Gray,
+                maxLines = 1, softWrap = false, modifier = Modifier.padding(start = 2.dp))
+        }
         if (arrow.isNotEmpty()) Text(arrow, fontSize = 8.sp, color = Blue700)
     }
 }
@@ -879,50 +969,96 @@ private fun HeaderCellBid(label: String, field: BidSortField, state: BidAnalysis
 @Composable
 private fun BidTableRow(
     result: BidStrategy.BidResult,
+    density: BidRowDensity = BidRowDensity.DETAIL,
     onStockClick: (code: String, name: String) -> Unit = { _, _ -> }
 ) {
     val s = result.item
-    Row(
+    val qStatus = quoteStatus(s.quoteAt, s.volume)
+    val vertical = if (density == BidRowDensity.DETAIL) 6.dp else 3.dp
+    Column(
         Modifier.fillMaxWidth()
             .background(Color.White, RoundedCornerShape(6.dp))
             .clickable { onStockClick(s.code, s.name) }
-            .padding(horizontal = 6.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 6.dp, vertical = vertical)
     ) {
-        // 名称 + 代码 (点击均可进入详情)
-        Column(
-            Modifier
-                .weight(1.3f)
-                .clickable { onStockClick(s.code, s.name) }
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            if (density == BidRowDensity.ULTRA) {
+                // 超紧凑：名称与代码合成一段富文本，放不下时整体省略，不会出现代码挤掉名称
+                val label = buildAnnotatedString {
+                    withStyle(SpanStyle(fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Blue700)) {
+                        append(s.name)
+                    }
+                    append("  ")
+                    withStyle(SpanStyle(fontSize = 8.5.sp, color = Color.Gray)) {
+                        append(s.code)
+                    }
+                }
                 Text(
-                    text = s.name,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Blue700,
+                    text = label,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(COL_WEIGHTS[0])
+                        .padding(end = 5.dp)
+                        .clickable { onStockClick(s.code, s.name) }
                 )
-                if (result.warnText != "-") {
-                    Text(result.warnText, fontSize = 9.sp, color = Red600,
-                        modifier = Modifier.padding(start = 1.dp))
+            } else {
+                // 详细 / 简版：名称与代码分两行
+                Column(
+                    Modifier.weight(COL_WEIGHTS[0]).clickable { onStockClick(s.code, s.name) }
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = s.name,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Blue700,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(s.code, fontSize = 10.sp, color = Color.Gray, maxLines = 1, softWrap = false)
+                        if (result.warnText != "-") {
+                            // 异动标签放代码这一行：跟着名称会挤掉股票名，换行还会把整行撑高
+                            Text(result.warnText, fontSize = 9.sp, color = Red600,
+                                maxLines = 1, softWrap = false,
+                                modifier = Modifier.padding(start = 4.dp))
+                        }
+                    }
                 }
             }
-            Text(s.code, fontSize = 10.sp, color = Color.Gray)
+            Text(formatPrice(s.latestPrice), fontSize = 11.sp, color = Blue700, modifier = Modifier.weight(COL_WEIGHTS[1]))
+            PctBar(formatPct(s.realChange), s.realChange, Red600, Green600, Modifier.weight(COL_WEIGHTS[2]))
+            PctBar(formatPct(s.bidChange), s.bidChange, Color(0xFF7C3AED), Color(0xFF16A34A), Modifier.weight(COL_WEIGHTS[3]))
+            Text(FinanceFormatter.formatMarketCapValue(s.circMv), fontSize = 10.sp, color = Color(0xFF374151), modifier = Modifier.weight(COL_WEIGHTS[4]))
+            Text("${result.probability}", fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                color = if (result.probability >= 70) Red600 else if (result.probability >= 50) Amber600 else Color.Gray,
+                modifier = Modifier.weight(COL_WEIGHTS[5]))
+            if (density != BidRowDensity.ULTRA) {
+                Text("${result.confidence}", fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                    color = if (result.confidence >= 75) Blue700 else Color.DarkGray,
+                    modifier = Modifier.weight(COL_WEIGHTS[6]))
+                Text("${result.score}", fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                    color = Blue700, modifier = Modifier.weight(COL_WEIGHTS[7]))
+            }
         }
-        Text(formatPrice(s.latestPrice), fontSize = 11.sp, color = Blue700, modifier = Modifier.weight(0.9f))
-        PctBar(formatPct(s.realChange), s.realChange, Red600, Green600, Modifier.weight(0.85f))
-        PctBar(formatPct(s.bidChange), s.bidChange, Color(0xFF7C3AED), Color(0xFF16A34A), Modifier.weight(0.85f))
-        Text(formatMv(s.circMv), fontSize = 10.sp, color = Color(0xFF374151), modifier = Modifier.weight(0.95f))
-        Text("${result.probability}%", fontSize = 11.sp, fontWeight = FontWeight.Bold,
-            color = if (result.probability >= 70) Red600 else if (result.probability >= 50) Amber600 else Color.Gray,
-            modifier = Modifier.weight(0.75f))
-        Text("${result.confidence}", fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-            color = if (result.confidence >= 75) Blue700 else Color.DarkGray,
-            modifier = Modifier.weight(0.75f))
-        Text("${result.score}", fontSize = 11.sp, fontWeight = FontWeight.Bold,
-            color = Blue700, modifier = Modifier.weight(0.65f))
+        // 详细模式第二行：数据时点与状态 + 入选理由 + 评分四项拆解(竞价/涨幅/异动/量能)
+        if (density == BidRowDensity.DETAIL) {
+            Text(
+                text = buildString {
+                    append("行情 ").append(quoteClock(s.quoteAt)).append(" · ").append(qStatus)
+                    if (result.reason.isNotBlank() && result.reason != "-") append(" · ").append(result.reason)
+                    append(" · 拆解 ").append(scoreSplitText(result))
+                },
+                fontSize = 8.5.sp,
+                color = quoteStatusColor(qStatus),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
     }
 }
 @Composable
@@ -940,6 +1076,7 @@ private fun PctBar(text: String, value: Double, positiveColor: Color, negativeCo
                 }
         )
         Text(text, fontSize = 11.sp, color = barColor, fontWeight = FontWeight.SemiBold,
+            maxLines = 1, softWrap = false, overflow = TextOverflow.Clip,
             modifier = Modifier.padding(start = 2.dp))
     }
 }

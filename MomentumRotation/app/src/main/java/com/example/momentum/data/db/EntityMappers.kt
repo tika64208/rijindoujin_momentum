@@ -25,14 +25,15 @@ fun BidDataEntity.toBidResult(): BidStrategy.BidResult =
             warnFlag = warnFlag,
             industry = industry,
             province = "",
-            conceptQuick = conceptQuick
+            conceptQuick = conceptQuick,
+            quoteAt = quoteAt
         ),
         probability = probability,
         confidence = confidence,
         bidTurnover = bidTurnover,
         entityChange = entityChange,
         score = score,
-        bidVolume = 0,
+        bidVolume = bidVolume,
         warnText = warnText,
         excluded = excluded,
         excludeReason = excludeReason,
@@ -68,7 +69,9 @@ fun BidStrategy.BidItem.toEntity(
         reason = result.reason,
         savedAt = savedAt,
         excluded = result.excluded,
-        excludeReason = result.excludeReason
+        excludeReason = result.excludeReason,
+        quoteAt = quoteAt,
+        bidVolume = result.bidVolume
     )
 
 fun DarkTradeDataEntity.toRecord(): DarkTradeDataSource.DarkTradeRecord =

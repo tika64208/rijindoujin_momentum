@@ -21,6 +21,8 @@ object BidSignalSnapshots {
         require(codeIndex >= 0) { "冻结档案缺少股票代码" }
         val p = column("冻结概率"); val c = column("冻结可信度"); val s = column("冻结评分")
         val bt = column("冻结竞价换手率")
+        // 估算竞价量是评分量能项的依据，档案里存了就一并还原，旧档案缺列时按 0 处理。
+        val bv = header.indexOfFirst { it == "冻结估算竞价量" }
         val version = column("评分版本")
         val data = org.json.JSONObject(archive.rawJson).getJSONObject("data").getJSONArray("diff")
         val raw = (0 until data.length()).associate { i -> data.getJSONObject(i).let { it.getString("f12") to it.toString() } }
@@ -30,7 +32,8 @@ object BidSignalSnapshots {
             require(row.size == header.size) { "冻结评分 CSV 列数不一致" }
             val item = requireNotNull(items[row[codeIndex]])
             val frozen = BidStrategy.BidResult(item = item, probability = row[p].toInt(), confidence = row[c].toInt(),
-                score = row[s].toInt(), bidTurnover = row[bt].toDouble())
+                score = row[s].toInt(), bidTurnover = row[bt].toDouble(),
+                bidVolume = if (bv >= 0) row[bv].toIntOrNull() ?: 0 else 0)
             require(frozen.probability in 0..100 && frozen.confidence in 0..100 && frozen.score in 0..100 && frozen.bidTurnover.isFinite()) {
                 "冻结评分数值无效"
             }

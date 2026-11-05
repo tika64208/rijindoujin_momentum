@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.momentum.data.BidRepository
+import com.example.momentum.data.BidRowDensity
 import com.example.momentum.data.db.BidDataEntity
 import com.example.momentum.engine.BidStrategy
 import com.example.momentum.util.BackupFileInfo
@@ -37,7 +38,8 @@ data class BidAnalysisState(
     val isPoolLocked: Boolean = false,
     val lockedCodes: Set<String> = emptySet(),
     val openingArchiveStatus: String = "正在读取 09:30 档案状态",
-    val openingAlarmAllowed: Boolean = false
+    val openingAlarmAllowed: Boolean = false,
+    val rowDensity: BidRowDensity = BidRowDensity.DETAIL
 ) {
     val displayResults: List<BidStrategy.BidResult>
         get() {
@@ -83,10 +85,22 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
             it.copy(
                 config = repository.loadConfig(),
                 isPoolLocked = isLocked,
-                lockedCodes = lockedCodes
+                lockedCodes = lockedCodes,
+                rowDensity = repository.loadRowDensity()
             )
         }
         loadBackupFiles()
+    }
+
+    /** 循环切换行密度：详细 → 简版 → 超紧凑 → 详细。 */
+    fun cycleRowDensity() {
+        val next = when (_state.value.rowDensity) {
+            BidRowDensity.DETAIL -> BidRowDensity.COMPACT
+            BidRowDensity.COMPACT -> BidRowDensity.ULTRA
+            BidRowDensity.ULTRA -> BidRowDensity.DETAIL
+        }
+        _state.update { it.copy(rowDensity = next) }
+        repository.saveRowDensity(next)
     }
 
     /**

@@ -90,7 +90,9 @@ data class BidDataEntity(
     val reason: String,
     val savedAt: String,
     val excluded: Boolean = false,
-    val excludeReason: String = ""
+    val excludeReason: String = "",
+    val quoteAt: Long = 0L,       // 该行行情时间(f124, 毫秒)；0=接口未给
+    val bidVolume: Int = 0        // 冻结时的估算竞价量，评分量能项的依据
 )
 
 /**

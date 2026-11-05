@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [DailyBarEntity::class, CacheMetaEntity::class, BidDataEntity::class, DarkTradeDataEntity::class, DarkTradeCacheEntity::class, WanlongHitEntity::class, OpeningBidArchiveEntity::class, OpeningBidChunk::class, BidSignalSnapshotEntity::class, BidPriceSnapshotEntity::class],
-    version = 9,
+    version = 10,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -122,6 +122,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v9 -> v10: bid_data 记录逐行行情时间(f124)与冻结时的估算竞价量，供列表展示数据时点与评分拆解。
+         * bid_signal_snapshot 以 @Embedded 内嵌 BidDataEntity，同一组列必须同步补齐。
+         */
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE bid_data ADD COLUMN quoteAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE bid_data ADD COLUMN bidVolume INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE bid_signal_snapshot ADD COLUMN quoteAt INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE bid_signal_snapshot ADD COLUMN bidVolume INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -137,7 +150,8 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_5_6,
                         MIGRATION_6_7,
                         MIGRATION_7_8,
-                        MIGRATION_8_9
+                        MIGRATION_8_9,
+                        MIGRATION_9_10
                     )
                     .build().also { INSTANCE = it }
             }

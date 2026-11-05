@@ -90,7 +90,8 @@ object EastmoneyBidDataSource {
                     warnFlag = optInt(row, "f630"),
                     industry = row.optString("f100", "-"),
                     province = row.optString("f102", "-"),
-                    conceptQuick = row.optString("f103", "-")
+                    conceptQuick = row.optString("f103", "-"),
+                    quoteAt = row.optLong("f124", 0L) * 1000L
                 )
             )
         }

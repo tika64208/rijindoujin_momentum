@@ -33,7 +33,8 @@ object BidStrategy {
         val warnFlag: Int = 0,             // f630 异动标志(3-5)
         val industry: String = "",
         val province: String = "",
-        val conceptQuick: String = ""      // f103 速动概念
+        val conceptQuick: String = "",     // f103 速动概念
+        val quoteAt: Long = 0L             // f124 该行行情时间(毫秒), 0 表示接口未给
     )
 
     data class BidResult(
@@ -180,20 +181,28 @@ object BidStrategy {
         return Pair(prob, conf)
     }
 
-    // ===== V2 评分 (以竞价开盘涨幅为基准，不受盘中股价波动污染) =====
-    fun computeV2Score(item: BidItem, bidVolume: Int): Int {
+    /**
+     * V2 评分的四项拆解，顺序固定为 [竞价, 涨幅, 异动, 量能]。
+     * 界面按这个顺序展示，便于说明"这个分数是怎么来的"。
+     */
+    fun scoreParts(item: BidItem, bidVolume: Int): DoubleArray {
         val changeForScore = if (item.bidChange != 0.0) item.bidChange else item.realChange
         val bidScore = max(0.0, min(item.bidChange / 9.0, 1.0)) * 50
         val realScore = max(0.0, min(changeForScore / 10.0, 1.0)) * 20
         val warnScore = when {
-            item.warnFlag == 5 -> 20
-            item.warnFlag == 4 -> 16
-            item.bidChange >= 4 -> 10
-            else -> 0
+            item.warnFlag == 5 -> 20.0
+            item.warnFlag == 4 -> 16.0
+            item.bidChange >= 4 -> 10.0
+            else -> 0.0
         }
         val vol = if (bidVolume > 0) bidVolume else estimateBidVolume(item)
         val volumeScore = max(0.0, min(vol / 200000.0, 1.0)) * 10
-        val total = (bidScore + realScore + warnScore + volumeScore).roundToInt()
+        return doubleArrayOf(bidScore, realScore, warnScore, volumeScore)
+    }
+
+    // ===== V2 评分 (以竞价开盘涨幅为基准，不受盘中股价波动污染) =====
+    fun computeV2Score(item: BidItem, bidVolume: Int): Int {
+        val total = scoreParts(item, bidVolume).sum().roundToInt()
         return max(0, min(total, 100))
     }
 
