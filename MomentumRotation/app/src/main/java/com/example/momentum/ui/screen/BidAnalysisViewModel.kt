@@ -16,6 +16,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * 竞价分析页面状态。
@@ -33,7 +35,9 @@ data class BidAnalysisState(
     val searchLoading: Boolean = false,
     val availableDates: List<String> = emptyList(),
     val isPoolLocked: Boolean = false,
-    val lockedCodes: Set<String> = emptySet()
+    val lockedCodes: Set<String> = emptySet(),
+    val openingArchiveStatus: String = "正在读取 09:30 档案状态",
+    val openingAlarmAllowed: Boolean = false
 ) {
     val displayResults: List<BidStrategy.BidResult>
         get() {
@@ -90,8 +94,30 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
      */
     fun loadBackupFiles() {
         viewModelScope.launch {
-            val files = DailyBackupManager.listBackupFiles(getApplication())
+            val files = withContext(Dispatchers.IO) { DailyBackupManager.listBackupFiles(getApplication()) }
             _backupFiles.value = files
+        }
+    }
+
+    suspend fun refreshOpeningStatus() {
+        val context = getApplication<Application>()
+        val status = com.example.momentum.data.OpeningBidRepository(context).todayStatus()
+        _state.update { it.copy(openingArchiveStatus = status,
+            openingAlarmAllowed = com.example.momentum.notify.OpeningBidScheduler.canSchedule(context)) }
+    }
+
+    fun restoreOpeningFiles(onResult: (String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                com.example.momentum.data.OpeningBidRepository(getApplication()).restoreFiles()
+                loadBackupFiles()
+                refreshOpeningStatus()
+                onResult("已从冻结档案恢复 CSV / JSON 文件；未请求新行情")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                onResult("档案仍保留在数据库；文件恢复失败：${e.message}")
+            }
         }
     }
 
@@ -275,6 +301,8 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
      * 获取今日符合高胜率配置的候选股票 (用于模拟盘分仓买入)
      */
     suspend fun getTodayHighWinRateCandidates(): List<BidDataEntity> {
-        return repository.getHighWinRateCandidates()
+        return try { repository.getHighWinRateCandidates() }
+        catch (e: kotlinx.coroutines.CancellationException) { throw e }
+        catch (e: Exception) { _state.update { it.copy(error = "模拟候选读取失败：${e.message}") }; emptyList() }
     }
 }

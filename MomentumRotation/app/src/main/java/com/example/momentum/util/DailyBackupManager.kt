@@ -129,11 +129,13 @@ object DailyBackupManager {
         val publicFiles = getPublicBackupDir().listFiles { f -> f.extension.equals("csv", ignoreCase = true) } ?: emptyArray()
         val appFiles = getAppBackupDir(context).listFiles { f -> f.extension.equals("csv", ignoreCase = true) } ?: emptyArray()
 
+        val openingFiles = com.example.momentum.data.OpeningBidRepository.files(context)
+        val distributionFiles = com.example.momentum.data.BidDistributionRepository.files(context)
         val allFiles = (publicFiles.toList() + appFiles.toList())
             .distinctBy { it.name }
             .sortedByDescending { it.lastModified() }
 
-        return allFiles.map { f ->
+        return distributionFiles + openingFiles + allFiles.map { f ->
             val dateStr = f.name.substringAfter("竞价全量备份_").substringBefore(".csv")
             BackupFileInfo(
                 file = f,
@@ -155,7 +157,7 @@ object DailyBackupManager {
             file
         )
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/csv"
+            type = if (file.extension.equals("json", ignoreCase = true)) "application/json" else "text/csv"
             putExtra(Intent.EXTRA_STREAM, fileUri)
             putExtra(Intent.EXTRA_SUBJECT, file.name)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -171,6 +173,7 @@ object DailyBackupManager {
      * 删除指定的备份文件。
      */
     fun deleteBackupFile(context: Context, info: BackupFileInfo): Boolean {
+        if (info.name.startsWith("竞价0930冻结_") || info.name.startsWith("竞价涨幅分布_")) return false
         var ok = false
         val publicFile = File(getPublicBackupDir(), info.name)
         if (publicFile.exists()) ok = publicFile.delete() || ok

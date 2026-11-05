@@ -1,334 +1,161 @@
 package com.example.momentum.data
 
 import android.content.Context
-import com.example.momentum.data.db.AppDatabase
-import com.example.momentum.data.db.BidDataEntity
+import android.util.AtomicFile
 import com.example.momentum.engine.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.time.Instant
+import java.time.LocalTime
 
-/**
- * 模拟买入与实盘结算全局管理器 (支持 100 万初始本金分仓、精确扣除印花税/佣金手续费与滑点)
- */
+/** 模拟账户与回测报告各自持久化；回测不写入账户或历史账本。 */
 class SimTradingManager private constructor(private val context: Context) {
-
+    private val mutex = Mutex()
+    private val data = SimTradingDataRepository(context)
     private val _accountState = MutableStateFlow(SimAccountState())
     val accountState: StateFlow<SimAccountState> = _accountState.asStateFlow()
+    private val _backtestReport = MutableStateFlow<SimBacktestReport?>(null)
+    val backtestReport: StateFlow<SimBacktestReport?> = _backtestReport.asStateFlow()
 
     init {
-        loadPersistedState()
+        readJson("sim_trading_account.json")?.let { _accountState.value = SimAccountCodec.decode(it) }
+        readJson("sim_backtest_report.json")?.let { _backtestReport.value = SimBacktestReport.fromJson(it) }
     }
 
-    /**
-     * 更新手续费与滑点交易摩擦配置
-     */
-    fun updateFeeConfig(config: SimTradingFeeConfig) {
-        _accountState.update { it.copy(feeConfig = config) }
-        persistState()
+    fun updateFeeConfig(config: SimTradingFeeConfig): Boolean {
+        if (!mutex.tryLock()) return false
+        try {
+            val next = _accountState.value.copy(feeConfig = config)
+            persistAccount(next)
+            _accountState.value = next
+            return true
+        } finally { mutex.unlock() }
     }
 
-    /**
-     * 今日早盘模拟买入: 高胜率选股结果平均分仓买入 (含买入滑点与买入佣金)
-     */
-    suspend fun buyToday(date: String, candidates: List<BidDataEntity>): Pair<Boolean, String> {
+    suspend fun buyToday(date: String): Pair<Boolean, String> = mutate {
+        checkTradingDate(date)
         val current = _accountState.value
-        if (current.todayRecord != null && current.todayRecord.status == "HOLDING" && current.todayRecord.date == date) {
-            return false to "今日已模拟买入持仓中，请勿重复买入"
-        }
-        if (candidates.isEmpty()) {
-            return false to "当前高胜率选股无符合条件的股票"
-        }
-
-        val dayRecord = SimTradingEngine.executeBuy(
-            currentCapital = current.currentCapital,
-            date = date,
-            candidates = candidates,
-            feeConfig = current.feeConfig
-        )
-
-        _accountState.update { state ->
-            val cashLeft = state.currentCapital - dayRecord.orders.sumOf { it.actualCost + it.buyFee }
-            state.copy(
-                todayRecord = dayRecord,
-                cash = cashLeft
-            )
-        }
-        persistState()
-        return true to "已使用当前资金平均分仓买入 ${dayRecord.orders.size} 只高胜率股票"
+        require(current.todayRecord?.status != "HOLDING") { "已有持仓，请先完成现有持仓的模拟结算" }
+        require(current.historyRecords.none { it.date == date }) { "今日已有账本，请使用今日重跑" }
+        val day = data.loadDay(date)
+        require(day.rows.isNotEmpty()) { "当前保存的早盘评分没有符合条件的股票" }
+        val bought = day.metadata(SimTradingEngine.executeBuy(current.currentCapital, date, day.rows, current.feeConfig))
+        val next = current.copy(todayRecord = bought,
+            cash = current.currentCapital - bought.orders.sumOf { it.actualCost + it.buyFee })
+        persistAccount(next); _accountState.value = next
+        "已按保存的早盘评分分仓买入 ${bought.orders.size} 只；${bought.priceQualityLabel()}"
     }
 
-    /**
-     * 尾盘结算: 全部平仓结算 (精确扣除卖出印花税0.05%、佣金与卖出滑点)
-     */
-    suspend fun settleToday(closePriceMap: Map<String, Double> = emptyMap()): Pair<Boolean, String> {
+    suspend fun settleToday(): Pair<Boolean, String> = mutate {
         val current = _accountState.value
-        val today = current.todayRecord
-        if (today == null || today.status != "HOLDING") {
-            return false to "当前暂无持仓中记录可结算"
+        val holding = requireNotNull(current.todayRecord?.takeIf { it.status == "HOLDING" }) { "当前没有持仓可结算" }
+        val prices = data.pricesFor(holding.date, holding.orders.map { it.code })
+        val quality = when {
+            prices.all { it.quality == "CLOSE_CONFIRMED" } -> "CLOSE_CONFIRMED"
+            prices.any { it.quality == "LEGACY_PRICE_UNVERIFIED" } -> "LEGACY_PRICE_UNVERIFIED"
+            else -> "INTRADAY_ESTIMATE"
         }
-
-        val settled = SimTradingEngine.executeSettle(
-            record = today,
-            closePriceMap = closePriceMap,
-            feeConfig = current.feeConfig
-        )
-        val profit = settled.profit
-        val newCapital = settled.endCapital
-        val totalProfit = current.totalProfit + profit
-        val totalReturnPct = if (current.initialCapital > 0) (totalProfit / current.initialCapital) * 100.0 else 0.0
-
-        val newHistory = mutableListOf<SimDayRecord>()
-        newHistory.add(settled)
-        newHistory.addAll(current.historyRecords.filter { it.date != settled.date })
-
-        val winCount = newHistory.count { it.profit > 0 }
-        val totalDays = newHistory.count { it.orders.isNotEmpty() }
-        val totalFee = newHistory.sumOf { it.totalFee }
-        val totalSlippage = newHistory.sumOf { it.totalSlippage }
-
-        _accountState.update {
-            it.copy(
-                currentCapital = newCapital,
-                cash = newCapital,
-                totalProfit = totalProfit,
-                totalReturnPct = totalReturnPct,
-                totalFeePaid = totalFee,
-                totalSlippagePaid = totalSlippage,
-                winDayCount = winCount,
-                totalDayCount = totalDays,
-                todayRecord = settled,
-                historyRecords = newHistory
-            )
-        }
-        persistState()
-        return true to "已按最新/收盘价全部平仓结算 (扣除印花税/佣金/滑点)，今日净盈亏: ${String.format("%+.2f元 (%+.2f%%)", profit, settled.returnPct)}"
+        val asOf = prices.filter { it.quoteAt > 0 }.maxOfOrNull { it.quoteAt }?.let {
+            Instant.ofEpochMilli(it).atZone(OpeningBidTime.zone).toString() } ?: "旧记录未保存行情时间"
+        val settled = SimTradingEngine.executeSettle(holding, prices.associate { it.code to it.price }, current.feeConfig)
+            .copy(priceQuality = quality, priceAsOf = asOf)
+        val next = SimTradingJournal.post(current, settled)
+        persistAccount(next); _accountState.value = next
+        "模拟结算完成：今日 ${String.format("%+.2f%%", settled.returnPct)} · ${settled.priceQualityLabel()}"
     }
 
-    /**
-     * 重新模拟今日: 用今日全部最新高胜率候选股票(如全量 12 只)重新模拟买入并尾盘平仓结算
-     */
-    suspend fun reSimulateToday(
-        date: String,
-        candidates: List<BidDataEntity>,
-        closePriceMap: Map<String, Double> = emptyMap()
-    ): Pair<Boolean, String> {
-        if (candidates.isEmpty()) {
-            return false to "当前无符合条件的股票可用于重算"
-        }
+    suspend fun reSimulateToday(date: String): Pair<Boolean, String> = mutate {
+        checkTradingDate(date)
         val current = _accountState.value
-        val todayProfit = current.todayRecord?.takeIf { it.date == date && it.status == "SETTLED" }?.profit ?: 0.0
-        val baseCapital = current.currentCapital - todayProfit
-
-        // 用今日真实全量标的买入
-        val dayBuy = SimTradingEngine.executeBuy(
-            currentCapital = baseCapital,
-            date = date,
-            candidates = candidates,
-            feeConfig = current.feeConfig
-        )
-
-        // 尾盘平仓结算
-        val settled = SimTradingEngine.executeSettle(
-            record = dayBuy,
-            closePriceMap = closePriceMap,
-            feeConfig = current.feeConfig
-        )
-
-        val newCapital = settled.endCapital
-        val totalProfit = (baseCapital - current.initialCapital) + settled.profit
-        val totalReturnPct = if (current.initialCapital > 0) (totalProfit / current.initialCapital) * 100.0 else 0.0
-
-        val newHistory = mutableListOf<SimDayRecord>()
-        newHistory.add(settled)
-        newHistory.addAll(current.historyRecords.filter { it.date != date })
-
-        val winCount = newHistory.count { it.profit > 0 }
-        val totalDays = newHistory.count { it.orders.isNotEmpty() }
-        val totalFee = newHistory.sumOf { it.totalFee }
-        val totalSlippage = newHistory.sumOf { it.totalSlippage }
-
-        _accountState.update {
-            it.copy(
-                currentCapital = newCapital,
-                cash = newCapital,
-                totalProfit = totalProfit,
-                totalReturnPct = totalReturnPct,
-                totalFeePaid = totalFee,
-                totalSlippagePaid = totalSlippage,
-                winDayCount = winCount,
-                totalDayCount = totalDays,
-                todayRecord = settled,
-                historyRecords = newHistory
-            )
-        }
-        persistState()
-        return true to "已使用今日全量 ${candidates.size} 只高胜率股票重新完成分仓模拟与结算！"
+        require(current.todayRecord?.let { it.status != "HOLDING" || it.date == date } != false) { "存在其他日期未结算持仓" }
+        val day = data.loadDay(date)
+        require(day.rows.isNotEmpty()) { "当前保存的早盘评分没有符合条件的股票" }
+        val original = current.todayRecord?.takeIf { it.date == date } ?: current.historyRecords.firstOrNull { it.date == date }
+        val base = original?.startCapital ?: current.currentCapital
+        val settled = day.metadata(SimTradingEngine.simulateDay(base, date, day.rows, BidStrategy.BidConfig.HIGH_WIN_RATE, current.feeConfig))
+        val next = SimTradingJournal.post(current, settled)
+        persistAccount(next); _accountState.value = next
+        "已按保存的早盘评分重跑 ${settled.orders.size} 只：今日 ${String.format("%+.2f%%", settled.returnPct)} · ${settled.priceQualityLabel()}"
     }
 
-    /**
-     * 历史全量数据一键回测 (考虑手续费与滑点摩擦，并进行实体竞价纯净性校准)
-     */
-    suspend fun runBacktest(db: AppDatabase, config: BidStrategy.BidConfig): SimAccountState =
-        withContext(Dispatchers.IO) {
-            val dates = db.bidDao().getDates(60)
-            if (dates.isEmpty()) return@withContext _accountState.value
-
-            val repository = BidRepository.create(context)
-            val dateMap = mutableMapOf<String, List<BidDataEntity>>()
-            for (d in dates) {
-                val list = db.bidDao().getByDate(d)
-                if (list.isNotEmpty()) {
-                    // 校准实体确保历史和今日都使用纯净竞价评分
-                    val sanitized = list.map { e ->
-                        val basePrice = if (e.openPrice > 0) e.openPrice else e.latestPrice
-                        val rawItem = BidStrategy.BidItem(
-                            code = e.code,
-                            name = e.name,
-                            latestPrice = basePrice,
-                            realChange = e.bidChange,
-                            openPrice = e.openPrice,
-                            volume = e.volume,
-                            amount = e.amount,
-                            turnover = e.turnover,
-                            circMv = e.circMv,
-                            bidChange = e.bidChange,
-                            warnFlag = e.warnFlag,
-                            industry = e.industry,
-                            conceptQuick = e.conceptQuick
-                        )
-                        val res = BidStrategy.compute(rawItem, config)
-                        e.copy(
-                            probability = res.probability,
-                            confidence = res.confidence,
-                            score = res.score
-                        )
-                    }
-                    dateMap[d] = sanitized
+    suspend fun runBacktest(config: BidStrategy.BidConfig,
+                            includeUnverified: Boolean = true): SimBacktestReport = withContext(Dispatchers.IO) {
+        val account = _accountState.value
+        val days = linkedMapOf<String, SimTradingDayData>()
+        val skipped = linkedMapOf<String, String>()
+        val notes = linkedMapOf<String, String>()
+        // 全部已存盘日期，不再只读取最近 60 个日期。
+        for (date in data.dates()) {
+            try {
+                val day = data.loadDay(date, config)
+                if (!includeUnverified && day.issues.isNotEmpty()) {
+                    skipped[date] = day.issues.joinToString("；")
+                    continue
                 }
-            }
-
-            val backtestResult = SimTradingEngine.runBacktest(
-                initialCapital = _accountState.value.initialCapital,
-                dateMap = dateMap,
-                config = config,
-                feeConfig = _accountState.value.feeConfig
-            )
-
-            _accountState.value = backtestResult
-            persistState()
-            backtestResult
+                days[date] = day
+                if (day.issues.isNotEmpty()) notes[date] = day.issues.joinToString("；")
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { skipped[date] = e.message ?: "数据不可用" }
         }
-
-    /**
-     * 重置账户资金回 100 万
-     */
-    fun resetAccount(initialCapital: Double = 1_000_000.0) {
-        val currentCfg = _accountState.value.feeConfig
-        _accountState.value = SimAccountState(
-            initialCapital = initialCapital,
-            currentCapital = initialCapital,
-            cash = initialCapital,
-            totalProfit = 0.0,
-            totalReturnPct = 0.0,
-            totalFeePaid = 0.0,
-            totalSlippagePaid = 0.0,
-            winDayCount = 0,
-            totalDayCount = 0,
-            feeConfig = currentCfg,
-            todayRecord = null,
-            historyRecords = emptyList()
-        )
-        persistState()
+        val result = SimTradingEngine.runBacktest(account.initialCapital, days.mapValues { it.value.rows }, config, account.feeConfig)
+        val history = result.historyRecords.map { record -> days.getValue(record.date).metadata(record) }
+        val report = SimBacktestReport(System.currentTimeMillis(), result.copy(historyRecords = history,
+            todayRecord = history.firstOrNull()), notes, skipped, includeUnverified)
+        // 只写独立报告，绝不把 result 赋给 _accountState。
+        writeJson("sim_backtest_report.json", report.toJson())
+        _backtestReport.value = report
+        report
     }
 
-    private fun getStorageFile(): File {
-        return File(context.filesDir, "sim_trading_account.json")
-    }
-
-    private fun persistState() {
+    fun resetAccount(initialCapital: Double = 1_000_000.0): Boolean {
+        if (!mutex.tryLock()) return false
         try {
-            val state = _accountState.value
-            val root = JSONObject()
-            root.put("initialCapital", state.initialCapital)
-            root.put("currentCapital", state.currentCapital)
-            root.put("cash", state.cash)
-            root.put("totalProfit", state.totalProfit)
-            root.put("totalReturnPct", state.totalReturnPct)
-            root.put("totalFeePaid", state.totalFeePaid)
-            root.put("totalSlippagePaid", state.totalSlippagePaid)
-            root.put("winDayCount", state.winDayCount)
-            root.put("totalDayCount", state.totalDayCount)
-            root.put("feeConfig", state.feeConfig.toJson())
+            val next = SimAccountState(initialCapital = initialCapital, currentCapital = initialCapital, cash = initialCapital,
+                feeConfig = _accountState.value.feeConfig)
+            persistAccount(next); _accountState.value = next
+            return true
+        } finally { mutex.unlock() }
+    }
 
-            state.todayRecord?.let {
-                root.put("todayRecord", it.toJson())
-            }
-
-            val histArr = JSONArray()
-            state.historyRecords.forEach { histArr.put(it.toJson()) }
-            root.put("historyRecords", histArr)
-
-            getStorageFile().writeText(root.toString(2))
-        } catch (e: Exception) {
-            e.printStackTrace()
+    private suspend fun mutate(action: suspend () -> String): Pair<Boolean, String> = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            try { true to action() }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { false to (e.message ?: "模拟操作失败，账本未变更") }
         }
     }
 
-    private fun loadPersistedState() {
-        val file = getStorageFile()
-        if (!file.exists()) {
-            _accountState.value = SimAccountState(1_000_000.0, 1_000_000.0, 1_000_000.0)
-            return
-        }
-        try {
-            val text = file.readText()
-            if (text.isBlank()) return
-            val root = JSONObject(text)
-            val todayObj = root.optJSONObject("todayRecord")
-            val todayRecord = if (todayObj != null) SimDayRecord.fromJson(todayObj) else null
+    private fun checkTradingDate(date: String) {
+        val now = Instant.now().atZone(OpeningBidTime.zone)
+        require(date == now.toLocalDate().toString() && now.dayOfWeek.value <= 5) { "只允许操作今日工作日模拟账户" }
+        require(!now.toLocalTime().isBefore(LocalTime.of(9, 30))) { "请在 09:30 后使用保存的早盘评分模拟" }
+    }
 
-            val histArr = root.optJSONArray("historyRecords") ?: JSONArray()
-            val histList = mutableListOf<SimDayRecord>()
-            for (i in 0 until histArr.length()) {
-                histList.add(SimDayRecord.fromJson(histArr.getJSONObject(i)))
-            }
-
-            val feeObj = root.optJSONObject("feeConfig")
-            val feeConfig = if (feeObj != null) SimTradingFeeConfig.fromJson(feeObj) else SimTradingFeeConfig()
-
-            _accountState.value = SimAccountState(
-                initialCapital = root.optDouble("initialCapital", 1_000_000.0),
-                currentCapital = root.optDouble("currentCapital", 1_000_000.0),
-                cash = root.optDouble("cash", 1_000_000.0),
-                totalProfit = root.optDouble("totalProfit", 0.0),
-                totalReturnPct = root.optDouble("totalReturnPct", 0.0),
-                totalFeePaid = root.optDouble("totalFeePaid", 0.0),
-                totalSlippagePaid = root.optDouble("totalSlippagePaid", 0.0),
-                winDayCount = root.optInt("winDayCount", 0),
-                totalDayCount = root.optInt("totalDayCount", 0),
-                feeConfig = feeConfig,
-                todayRecord = todayRecord,
-                historyRecords = histList
-            )
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+    private fun persistAccount(state: SimAccountState) = writeJson("sim_trading_account.json", SimAccountCodec.encode(state))
+    private fun writeJson(name: String, json: JSONObject) {
+        val atomic = AtomicFile(File(context.filesDir, name))
+        val stream = atomic.startWrite()
+        try { stream.write(json.toString(2).toByteArray(Charsets.UTF_8)); atomic.finishWrite(stream) }
+        catch (e: Exception) { atomic.failWrite(stream); throw e }
+    }
+    private fun readJson(name: String): JSONObject? {
+        val file = File(context.filesDir, name)
+        if (!file.exists()) return null
+        return JSONObject(AtomicFile(file).openRead().bufferedReader().use { it.readText() })
     }
 
     companion object {
-        @Volatile
-        private var INSTANCE: SimTradingManager? = null
-
-        fun get(context: Context): SimTradingManager =
-            INSTANCE ?: synchronized(this) {
-                INSTANCE ?: SimTradingManager(context.applicationContext).also { INSTANCE = it }
-            }
+        @Volatile private var INSTANCE: SimTradingManager? = null
+        fun get(context: Context): SimTradingManager = INSTANCE ?: synchronized(this) {
+            INSTANCE ?: SimTradingManager(context.applicationContext).also { INSTANCE = it }
+        }
     }
 }

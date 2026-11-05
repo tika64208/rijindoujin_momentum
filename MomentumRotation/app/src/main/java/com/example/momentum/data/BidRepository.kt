@@ -10,6 +10,8 @@ import com.example.momentum.engine.BidStrategy
 import com.example.momentum.util.DailyBackupManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import androidx.room.withTransaction
+import com.example.momentum.data.db.BidPriceSnapshotEntity
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.LocalTime
@@ -20,7 +22,7 @@ import java.time.format.DateTimeFormatter
  *
  * 职责：
  * - 协调竞价数据网络拉取与 Room 数据库快照持久化
- * - 9:32 时间锁：早盘竞价快照保护，防盘中/盘后被日内行情覆写
+ * - 9:30 时间锁：早盘竞价快照保护，防盘中/盘后被日内行情覆写
  * - 多维条件实时筛选与内存/DB 双层检索
  * - 历史个股 30 日竞价追溯
  * - 筛选参数 SharedPreferences 本地持久化
@@ -116,11 +118,13 @@ class BidRepository(
     suspend fun refresh(config: BidStrategy.BidConfig, force: Boolean = true): Result<Int> =
         withContext(Dispatchers.IO) {
             try {
-                val today = LocalDate.now().toString()
-                val now = LocalTime.now()
-                val isAfterOpen = now.isAfter(LocalTime.of(9, 30))
+                val market = EastmoneyBidDataSource.fetchMarket()
+                val currentTime = java.time.Instant.ofEpochMilli(market.receivedAt).atZone(OpeningBidTime.zone)
+                val today = currentTime.toLocalDate().toString()
+                val now = currentTime.toLocalTime()
+                val isAfterOpen = !now.isBefore(LocalTime.of(9, 30))
 
-                val rawItems = EastmoneyBidDataSource.fetchAll()
+                val rawItems = market.items
                 if (rawItems.isEmpty()) {
                     return@withContext Result.failure(RuntimeException("未拉取到竞价数据"))
                 }
@@ -180,7 +184,18 @@ class BidRepository(
                         mergedItem.toEntity(today, result, savedAt)
                     }
                 }
-                bidDao.insertAll(entities)
+                database.withTransaction {
+                    bidDao.insertAll(entities)
+                    database.bidSimulationDao().upsertPrices(rawItems.map { item ->
+                        val quoteAt = market.quoteTimes[item.code] ?: 0L
+                        BidPriceSnapshotEntity(item.code, today, item.latestPrice, item.realChange, item.volume,
+                            item.amount, item.turnover, quoteAt, market.receivedAt,
+                            SimTradingDataRepository.priceQuality(today, quoteAt, market.receivedAt))
+                    })
+                    if (isAfterOpen && currentTime.dayOfWeek.value <= 5) {
+                        database.bidSimulationDao().insertSignals(entities.map(BidSignalSnapshots::legacy))
+                    }
+                }
 
                 // 自动每日备份至本地 CSV 文件
                 appContext?.let { ctx ->
@@ -190,6 +205,8 @@ class BidRepository(
                 }
 
                 Result.success(entities.size)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Result.failure(e)
             }
@@ -203,9 +220,8 @@ class BidRepository(
         date: String = LocalDate.now().toString()
     ): Pair<List<BidStrategy.BidResult>, String> =
         withContext(Dispatchers.IO) {
-            val entities = bidDao.getByDate(date)
-            val sanitized = entities.map { sanitizeEntity(it, config) }
-            val filtered = sanitized.filter { applyFilter(it, config) }
+            val entities = readAnalysisRows(date)
+            val filtered = entities.filter { applyFilter(it, config) }
                 .map { it.toBidResult() }
                 .sortedByDescending { it.probability }
             val savedAt = entities.firstOrNull()?.savedAt ?: ""
@@ -221,61 +237,14 @@ class BidRepository(
         config: BidStrategy.BidConfig = BidStrategy.BidConfig.DEFAULT
     ): Pair<List<BidStrategy.BidResult>, String> =
         withContext(Dispatchers.IO) {
-            val entities = bidDao.getByDate(date)
-            val sanitized = entities.map { sanitizeEntity(it, config) }
-            val filtered = sanitized.filter { it.code in lockedCodes }
+            val entities = readAnalysisRows(date)
+            val filtered = entities.filter { it.code in lockedCodes }
                 .map { it.toBidResult() }
                 .sortedByDescending { it.probability }
             val savedAt = entities.firstOrNull()?.savedAt ?: ""
             filtered to savedAt
         }
 
-    /**
-     * 对实体进行竞价纯净性校准：确保评分和概率完全由早盘竞价数据决定，不受盘中股价波动污染。
-     */
-    private fun sanitizeEntity(e: BidDataEntity, config: BidStrategy.BidConfig): BidDataEntity {
-        // 若早盘已保存快照且已有预测结果，保持早盘锁定的竞价因子、概率与评分，防止被盘中累计成交量重算污染
-        if (e.savedAt.isNotBlank() && e.savedAt <= "09:30:00" && e.probability > 0) {
-            val (excluded, reason) = BidStrategy.getExcludeStatus(
-                BidStrategy.BidItem(
-                    code = e.code,
-                    name = e.name,
-                    latestPrice = if (e.openPrice > 0) e.openPrice else e.latestPrice,
-                    realChange = e.bidChange,
-                    openPrice = e.openPrice,
-                    circMv = e.circMv,
-                    bidChange = e.bidChange
-                ),
-                config
-            )
-            return e.copy(excluded = excluded, excludeReason = reason)
-        }
-
-        val basePrice = if (e.openPrice > 0) e.openPrice else e.latestPrice
-        val rawItem = BidStrategy.BidItem(
-            code = e.code,
-            name = e.name,
-            latestPrice = basePrice,
-            realChange = e.bidChange, // 严格以竞价涨幅为基准
-            openPrice = e.openPrice,
-            volume = e.volume,
-            amount = e.amount,
-            turnover = e.turnover,
-            circMv = e.circMv,
-            bidChange = e.bidChange,
-            warnFlag = e.warnFlag,
-            industry = e.industry,
-            conceptQuick = e.conceptQuick
-        )
-        val res = BidStrategy.compute(rawItem, config)
-        return e.copy(
-            probability = res.probability,
-            confidence = res.confidence,
-            score = res.score,
-            excluded = res.excluded,
-            excludeReason = res.excludeReason
-        )
-    }
 
     /**
      * 持久化锁定的股票池代码
@@ -306,9 +275,8 @@ class BidRepository(
         date: String = LocalDate.now().toString()
     ): List<BidStrategy.BidResult> =
         withContext(Dispatchers.IO) {
-            val entities = bidDao.getByDate(date)
-            val sanitized = entities.map { sanitizeEntity(it, config) }
-            sanitized.filter { applyFilter(it, config) }
+            val entities = readAnalysisRows(date)
+            entities.filter { applyFilter(it, config) }
                 .map { it.toBidResult() }
                 .sortedByDescending { it.probability }
         }
@@ -318,48 +286,34 @@ class BidRepository(
      */
     suspend fun getHighWinRateCandidates(date: String = LocalDate.now().toString()): List<BidDataEntity> =
         withContext(Dispatchers.IO) {
-            val entities = bidDao.getByDate(date)
-            val sanitized = entities.map { sanitizeEntity(it, BidStrategy.BidConfig.HIGH_WIN_RATE) }
-            sanitized.filter { applyFilter(it, BidStrategy.BidConfig.HIGH_WIN_RATE) }
+            val context = requireNotNull(appContext)
+            SimTradingDataRepository(context).loadDay(date).rows
         }
 
     /**
      * 多维条件实时筛选判断。
      */
-    fun applyFilter(e: BidDataEntity, cfg: BidStrategy.BidConfig): Boolean {
-        // ST / 停牌剔除
-        if (cfg.filterStSuspend && (e.name.contains("ST", ignoreCase = true) || e.name.contains("停", ignoreCase = true))) {
-            return false
+    fun applyFilter(e: BidDataEntity, cfg: BidStrategy.BidConfig): Boolean =
+        com.example.momentum.engine.BidCandidateSelector.matches(e, cfg)
+
+    /** 分析页也使用同一份冻结评分，只拼接独立的当前行情用于展示。 */
+    private suspend fun readAnalysisRows(date: String): List<BidDataEntity> = database.withTransaction {
+        val current = bidDao.getByDate(date).associateBy { it.code }
+        val allSignals = database.bidSimulationDao().signals(date)
+        val opening = allSignals.filter { it.source == "OPENING_0930" }
+        val signals = (opening.ifEmpty { allSignals }).associateBy { it.signal.code }
+        val prices = database.bidSimulationDao().prices(date).associateBy { it.code }
+        val base = if (opening.isNotEmpty() || current.isEmpty()) signals.values.map { it.signal } else current.values.toList()
+        base.map { e ->
+            val frozen = signals[e.code]?.signal ?: e
+            val latest = current[e.code]
+            val price = prices[e.code]
+            frozen.copy(latestPrice = price?.price ?: latest?.latestPrice ?: e.latestPrice,
+                realChange = price?.realChange ?: latest?.realChange ?: e.realChange,
+                volume = price?.volume ?: latest?.volume ?: e.volume,
+                amount = price?.amount ?: latest?.amount ?: e.amount,
+                turnover = price?.turnover ?: latest?.turnover ?: e.turnover)
         }
-        // 昨日涨停剔除
-        if (cfg.filterLimitUp && e.warnFlag >= 5) return false
-
-        // 市场筛选
-        if (!cfg.marketHs && !cfg.marketCyb && !cfg.marketKcb) return false
-        val isHs = (e.code.startsWith("6") && !e.code.startsWith("688")) || e.code.startsWith("00")
-        val isCyb = e.code.startsWith("3")
-        val isKcb = e.code.startsWith("688")
-        if (isHs && !cfg.marketHs) return false
-        if (isCyb && !cfg.marketCyb) return false
-        if (isKcb && !cfg.marketKcb) return false
-
-        // 区间条件判断
-        if (cfg.bidMin > 0 && e.bidChange < cfg.bidMin) return false
-        if (cfg.bidMax > 0 && e.bidChange > cfg.bidMax) return false
-        if (cfg.probMin > 0 && e.probability < cfg.probMin) return false
-        if (cfg.probMax > 0 && e.probability > cfg.probMax) return false
-        if (cfg.confMin > 0 && e.confidence < cfg.confMin) return false
-        if (cfg.confMax > 0 && e.confidence > cfg.confMax) return false
-        if (cfg.scoreMin > 0 && e.score < cfg.scoreMin) return false
-        if (cfg.scoreMax > 0 && e.score > cfg.scoreMax) return false
-        if (cfg.mvMin > 0 && e.circMv / 1e8 < cfg.mvMin) return false
-        if (cfg.mvMax > 0 && e.circMv / 1e8 > cfg.mvMax) return false
-        val checkPrice = if (e.openPrice > 0) e.openPrice else e.latestPrice
-        if (cfg.priceMin > 0 && checkPrice < cfg.priceMin) return false
-        if (cfg.priceMax > 0 && checkPrice > cfg.priceMax) return false
-        if (cfg.filterLargeVolume && e.volume < cfg.filterLargeVolumeThreshold) return false
-
-        return true
     }
 
     /**

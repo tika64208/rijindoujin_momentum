@@ -44,6 +44,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -52,6 +57,8 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.momentum.ui.screen.BidAnalysisScreen
+import com.example.momentum.ui.screen.BidDistributionScreen
+import com.example.momentum.ui.screen.ReturnCalendarScreen
 import com.example.momentum.ui.screen.DarkTradeListScreen
 import com.example.momentum.ui.screen.DownloadState
 import com.example.momentum.ui.screen.DownloadViewModel
@@ -93,6 +100,20 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // 前台兜底覆盖所有页面；精确闹钟负责应用退后台后的同一时点。
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                val scheduler = com.example.momentum.notify.OpeningBidScheduler
+                scheduler.schedule(this@MainActivity)
+                while (true) {
+                    scheduler.captureIfDue(this@MainActivity)
+                    val now = System.currentTimeMillis()
+                    val wait = com.example.momentum.data.OpeningBidTime.nextTarget(now) - now
+                    delay(wait.coerceAtLeast(1_000))
+                }
+            }
+        }
 
         // 请求通知权限(Android 13+), 低版本无需
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -211,8 +232,20 @@ private fun AppNavHost() {
             composable(mainTabs[3].route) {
                 BidAnalysisScreen(
                     onBack = { navController.popBackStack() },
+                    onOpenDistribution = { navController.navigate("bid_distribution") },
+                    onOpenReturnCalendar = { backtest -> navController.navigate("return_calendar?backtest=$backtest") },
                     onStockClick = { code, name -> navController.navigate("detail/$code/$name") }
                 )
+            }
+            composable("bid_distribution") {
+                BidDistributionScreen(onBack = { navController.popBackStack() })
+            }
+            composable("return_calendar?backtest={backtest}", arguments = listOf(navArgument("backtest") {
+                type = NavType.BoolType; defaultValue = false
+            })) { entry ->
+                ReturnCalendarScreen(onBack = { navController.popBackStack() },
+                    initialBacktest = entry.arguments?.getBoolean("backtest") ?: false,
+                    onStockClick = { code, name -> navController.navigate("detail/$code/$name") })
             }
             // 股票详情(二级)
             composable(

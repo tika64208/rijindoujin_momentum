@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [DailyBarEntity::class, CacheMetaEntity::class, BidDataEntity::class, DarkTradeDataEntity::class, DarkTradeCacheEntity::class, WanlongHitEntity::class],
-    version = 7,
+    entities = [DailyBarEntity::class, CacheMetaEntity::class, BidDataEntity::class, DarkTradeDataEntity::class, DarkTradeCacheEntity::class, WanlongHitEntity::class, OpeningBidArchiveEntity::class, OpeningBidChunk::class, BidSignalSnapshotEntity::class, BidPriceSnapshotEntity::class],
+    version = 9,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -17,6 +17,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun bidDao(): BidDao
     abstract fun darkTradeDao(): DarkTradeDao
     abstract fun wanlongDao(): WanlongDao
+    abstract fun openingBidDao(): OpeningBidDao
+    abstract fun bidSimulationDao(): BidSimulationDao
 
     companion object {
         @Volatile
@@ -104,6 +106,22 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS opening_bid_archive (date TEXT NOT NULL, startedAt INTEGER NOT NULL, receivedAt INTEGER NOT NULL, rowCount INTEGER NOT NULL, schemaVersion INTEGER NOT NULL, PRIMARY KEY(date))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS opening_bid_archive_chunk (date TEXT NOT NULL, kind TEXT NOT NULL, part INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(date, kind, part))")
+            }
+        }
+
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS bid_signal_snapshot (code TEXT NOT NULL, date TEXT NOT NULL, name TEXT NOT NULL, latestPrice REAL NOT NULL, realChange REAL NOT NULL, openPrice REAL NOT NULL, volume INTEGER NOT NULL, amount REAL NOT NULL, turnover REAL NOT NULL, circMv REAL NOT NULL, bidChange REAL NOT NULL, warnFlag INTEGER NOT NULL, industry TEXT NOT NULL, conceptQuick TEXT NOT NULL, probability INTEGER NOT NULL, confidence INTEGER NOT NULL, score INTEGER NOT NULL, bidTurnover REAL NOT NULL, entityChange REAL NOT NULL, warnText TEXT NOT NULL, reason TEXT NOT NULL, savedAt TEXT NOT NULL, excluded INTEGER NOT NULL, excludeReason TEXT NOT NULL, source TEXT NOT NULL, scoringVersion TEXT NOT NULL, rawInputJson TEXT NOT NULL, frozenAt INTEGER NOT NULL, PRIMARY KEY(code, date, source))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS bid_price_snapshot (code TEXT NOT NULL, date TEXT NOT NULL, price REAL NOT NULL, realChange REAL NOT NULL, volume INTEGER NOT NULL, amount REAL NOT NULL, turnover REAL NOT NULL, quoteAt INTEGER NOT NULL, fetchedAt INTEGER NOT NULL, quality TEXT NOT NULL, PRIMARY KEY(code, date))")
+                db.execSQL("INSERT OR IGNORE INTO bid_signal_snapshot (code, date, name, latestPrice, realChange, openPrice, volume, amount, turnover, circMv, bidChange, warnFlag, industry, conceptQuick, probability, confidence, score, bidTurnover, entityChange, warnText, reason, savedAt, excluded, excludeReason, source, scoringVersion, rawInputJson, frozenAt) SELECT code, date, name, openPrice, bidChange, openPrice, 0, 0, 0, circMv, bidChange, warnFlag, industry, conceptQuick, probability, confidence, score, bidTurnover, entityChange, warnText, reason, savedAt, excluded, excludeReason, CASE WHEN savedAt >= '09:15:00' AND savedAt <= '09:30:00' AND probability > 0 THEN 'LEGACY_EARLY' ELSE 'UNVERIFIED' END, 'legacy-stored', '', 0 FROM bid_data WHERE date < date('now','+8 hours') OR (date = date('now','+8 hours') AND time('now','+8 hours') >= '09:30:00')")
+                db.execSQL("INSERT OR IGNORE INTO bid_price_snapshot (code,date,price,realChange,volume,amount,turnover,quoteAt,fetchedAt,quality) SELECT code,date,latestPrice,realChange,volume,amount,turnover,0,0,'LEGACY_PRICE_UNVERIFIED' FROM bid_data")
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -117,7 +135,9 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_3_4,
                         MIGRATION_4_5,
                         MIGRATION_5_6,
-                        MIGRATION_6_7
+                        MIGRATION_6_7,
+                        MIGRATION_7_8,
+                        MIGRATION_8_9
                     )
                     .build().also { INSTANCE = it }
             }

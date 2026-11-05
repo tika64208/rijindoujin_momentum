@@ -22,12 +22,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.momentum.data.SimTradingManager
-import com.example.momentum.data.db.AppDatabase
 import com.example.momentum.data.db.BidDataEntity
 import com.example.momentum.engine.BidStrategy
 import com.example.momentum.engine.SimDayRecord
 import com.example.momentum.engine.SimOrder
 import com.example.momentum.engine.SimTradingFeeConfig
+import com.example.momentum.engine.priceQualityLabel
+import com.example.momentum.engine.signalQualityLabel
 import com.example.momentum.ui.theme.*
 import com.example.momentum.util.FinanceFormatter
 import kotlinx.coroutines.launch
@@ -38,13 +39,18 @@ fun SimTradingSheet(
     todayDate: String,
     todayCandidates: List<BidDataEntity>,
     onDismiss: () -> Unit,
-    onStockClick: (code: String, name: String) -> Unit = { _, _ -> }
+    onStockClick: (code: String, name: String) -> Unit = { _, _ -> },
+    onOpenReturnCalendar: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val simManager = remember { SimTradingManager.get(context) }
     val accountState by simManager.accountState.collectAsState()
     var isBacktesting by remember { mutableStateOf(false) }
+    var isOperating by remember { mutableStateOf(false) }
+    var includeUnverified by remember { mutableStateOf(true) }
+    var expandBacktest by remember { mutableStateOf(false) }
+    val backtestReport by simManager.backtestReport.collectAsState()
 
     val todayRecord = accountState.todayRecord
     val isHoldingToday = todayRecord != null && todayRecord.date == todayDate && todayRecord.status == "HOLDING"
@@ -89,11 +95,13 @@ fun SimTradingSheet(
             }
 
             Text(
-                text = "实盘规则: 竞价(2%~4%)高胜率标的平均分仓买入，尾盘按收盘价卖出结算，含手续费与滑点",
+                text = "模拟口径：沿用存盘早盘评分平均分仓，最新行情估算；有收盘行情凭证时标记已确认，含手续费与滑点",
                 fontSize = 11.sp,
                 color = Color.Gray,
                 modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
             )
+
+            TextButton(onClick = { onOpenReturnCalendar(false) }) { Text("收益日历", fontWeight = FontWeight.SemiBold) }
 
             // 1. 资产总览卡片
             Card(
@@ -218,6 +226,7 @@ fun SimTradingSheet(
                         }
                         Switch(
                             checked = feeCfg.enableFee,
+                            enabled = !isOperating,
                             onCheckedChange = {
                                 simManager.updateFeeConfig(feeCfg.copy(enableFee = it))
                             },
@@ -241,6 +250,7 @@ fun SimTradingSheet(
                         }
                         Switch(
                             checked = feeCfg.enableSlippage,
+                            enabled = !isOperating,
                             onCheckedChange = {
                                 simManager.updateFeeConfig(feeCfg.copy(enableSlippage = it))
                             },
@@ -251,6 +261,8 @@ fun SimTradingSheet(
             }
 
             Spacer(Modifier.height(12.dp))
+
+            Text("费用开关用于新模拟和新回测；已有持仓使用买入时的费用配置。", fontSize = 10.sp, color = Color.Gray)
 
             // 3. 今日操作控制台
             Card(
@@ -273,8 +285,8 @@ fun SimTradingSheet(
                         )
                         Text(
                             text = when {
-                                isHoldingToday -> "● 持仓中 (等待尾盘结算)"
-                                isSettledToday -> "✓ 今日已结算"
+                                isHoldingToday -> "● 持仓中（按保存行情估算）"
+                                isSettledToday -> "✓ 今日已模拟结算"
                                 else -> "○ 未建仓"
                             },
                             fontSize = 12.sp,
@@ -299,11 +311,12 @@ fun SimTradingSheet(
                         Button(
                             onClick = {
                                 scope.launch {
-                                    val (ok, msg) = simManager.buyToday(todayDate, todayCandidates)
+                                    isOperating = true
+                                    val (ok, msg) = try { simManager.buyToday(todayDate) } finally { isOperating = false }
                                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                 }
                             },
-                            enabled = todayCandidates.isNotEmpty(),
+                            enabled = todayCandidates.isNotEmpty() && !isOperating,
                             modifier = Modifier.fillMaxWidth(),
                             colors = ButtonDefaults.buttonColors(containerColor = Blue700),
                             shape = RoundedCornerShape(8.dp)
@@ -328,7 +341,7 @@ fun SimTradingSheet(
                                 Text("当前持仓标的: ${todayRecord?.orders?.size ?: 0} 只", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                                 Spacer(Modifier.height(4.dp))
                                 Text(
-                                    text = String.format("净浮动盈亏: %+.2f 元 (%+.2f%%)", holdingProfit, holdingReturn),
+                                    text = String.format("买入时行情估算: %+.2f 元 (%+.2f%%)", holdingProfit, holdingReturn),
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = if (holdingProfit >= 0) Red600 else Green600
@@ -344,15 +357,17 @@ fun SimTradingSheet(
                         Button(
                             onClick = {
                                 scope.launch {
-                                    val (ok, msg) = simManager.settleToday()
+                                    isOperating = true
+                                    val (ok, msg) = try { simManager.settleToday() } finally { isOperating = false }
                                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                 }
                             },
                             modifier = Modifier.fillMaxWidth(),
+                            enabled = !isOperating,
                             colors = ButtonDefaults.buttonColors(containerColor = Red600),
                             shape = RoundedCornerShape(8.dp)
                         ) {
-                            Text("尾盘全部卖出结算平仓", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            Text("按保存的最新行情模拟结算", fontSize = 13.sp, fontWeight = FontWeight.Bold)
                         }
                     } else {
                         // 今日已结算
@@ -367,7 +382,7 @@ fun SimTradingSheet(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column {
-                                    Text("今日结算已入账", fontSize = 12.sp, color = Green600, fontWeight = FontWeight.Bold)
+                                    Text("今日模拟已入账 · ${todayRecord?.priceQualityLabel()}", fontSize = 12.sp, color = Green600, fontWeight = FontWeight.Bold)
                                     if ((todayRecord?.totalFee ?: 0.0) > 0) {
                                         Text("规费印花税: -¥${String.format("%.2f", todayRecord?.totalFee)}", fontSize = 10.sp, color = Color.Gray)
                                     }
@@ -387,16 +402,18 @@ fun SimTradingSheet(
                             OutlinedButton(
                                 onClick = {
                                     scope.launch {
-                                        val (ok, msg) = simManager.reSimulateToday(todayDate, todayCandidates)
+                                        isOperating = true
+                                        val (ok, msg) = try { simManager.reSimulateToday(todayDate) } finally { isOperating = false }
                                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                     }
                                 },
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(8.dp),
+                                enabled = !isOperating,
                                 colors = ButtonDefaults.outlinedButtonColors(contentColor = Blue700)
                             ) {
                                 Text(
-                                    text = "🔄 按今日最新 ${todayCandidates.size} 只全量标的重跑模拟结算",
+                                    text = "按早盘评分与最新行情重跑 (${todayCandidates.size}只)",
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )
@@ -417,6 +434,8 @@ fun SimTradingSheet(
                 ) {
                     Column(Modifier.padding(14.dp)) {
                         Text("📋 今日交易明细清单 (${todayRecord.orders.size}只)", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Blue700)
+                        Text("${todayRecord.signalQualityLabel()} · ${todayRecord.priceQualityLabel()}", fontSize = 10.sp, color = Color.Gray)
+                        Text(todayRecord.priceAsOf, fontSize = 10.sp, color = Color.Gray)
                         Spacer(Modifier.height(8.dp))
 
                         todayRecord.orders.forEachIndexed { index, order ->
@@ -439,6 +458,13 @@ fun SimTradingSheet(
                 Column(Modifier.padding(14.dp)) {
                     Text("🛠 策略回测与账户管理", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color(0xFF1E293B))
                     Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = includeUnverified, enabled = !isBacktesting,
+                            onCheckedChange = { includeUnverified = it })
+                        Text("包含未验证历史（保留存盘评分和价格，不重算评分）", fontSize = 11.sp, modifier = Modifier.weight(1f))
+                    }
+                    Text("关闭后只使用已冻结评分且收盘价已确认的数据。回测结果独立保存，不写模拟账本。", fontSize = 11.sp, color = Color.Gray)
+
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -448,13 +474,16 @@ fun SimTradingSheet(
                             onClick = {
                                 isBacktesting = true
                                 scope.launch {
-                                    val db = AppDatabase.get(context)
-                                    val res = simManager.runBacktest(db, BidStrategy.BidConfig.HIGH_WIN_RATE)
-                                    isBacktesting = false
-                                    Toast.makeText(context, "历史回测完成: 收益率 ${String.format("%+.2f%%", res.totalReturnPct)}", Toast.LENGTH_SHORT).show()
+                                    try {
+                                        val report = simManager.runBacktest(BidStrategy.BidConfig.HIGH_WIN_RATE, includeUnverified)
+                                        expandBacktest = true
+                                        Toast.makeText(context, "独立回测完成：历史累计 ${String.format("%+.2f%%", report.result.totalReturnPct)}，模拟账户未变更", Toast.LENGTH_LONG).show()
+                                    } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                                    catch (e: Exception) { Toast.makeText(context, "回测失败：${e.message}", Toast.LENGTH_LONG).show() }
+                                    finally { isBacktesting = false }
                                 }
                             },
-                            enabled = !isBacktesting,
+                            enabled = !isBacktesting && !isOperating,
                             modifier = Modifier.weight(1f)
                         ) {
                             if (isBacktesting) {
@@ -463,19 +492,45 @@ fun SimTradingSheet(
                                 Icon(Icons.Filled.History, contentDescription = null, modifier = Modifier.size(16.dp))
                             }
                             Spacer(Modifier.width(4.dp))
-                            Text("历史全量回测", fontSize = 12.sp)
+                            Text("生成独立历史回测", fontSize = 12.sp)
                         }
 
                         OutlinedButton(
                             onClick = {
-                                simManager.resetAccount(1_000_000.0)
-                                Toast.makeText(context, "已重置为 100 万元初始账户", Toast.LENGTH_SHORT).show()
+                                val ok = simManager.resetAccount(1_000_000.0)
+                                Toast.makeText(context, if (ok) "已重置为 100 万元初始账户" else "账户操作中，请稍后再试", Toast.LENGTH_SHORT).show()
                             },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            enabled = !isOperating && !isBacktesting
                         ) {
                             Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("重置为100万", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+
+            backtestReport?.let { report ->
+                Spacer(Modifier.height(12.dp))
+                Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFEFF6FF)), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(14.dp)) {
+                        Text("独立历史回测报告", fontWeight = FontWeight.Bold, color = Blue700)
+                        Text("生成时间 ${java.time.Instant.ofEpochMilli(report.generatedAt).atZone(java.time.ZoneId.of("Asia/Shanghai")).toLocalDateTime()}", fontSize = 10.sp, color = Color.Gray)
+                        Text("历史累计收益 ${String.format("%+.2f%%", report.result.totalReturnPct)} · ${report.result.historyRecords.size} 个日期", fontSize = 15.sp)
+                        Text("初始本金 ${String.format("%,.2f", report.result.initialCapital)} 元 · 沿用存盘评分 · ${if (report.result.feeConfig.enableFee) "含手续费" else "不含手续费"} · ${if (report.result.feeConfig.enableSlippage) "含滑点" else "不含滑点"}", fontSize = 11.sp, color = Color.Gray)
+                        Text("未验证 ${report.notes.size} 日 · 跳过 ${report.skipped.size} 日；不改变模拟账户资金。", fontSize = 11.sp, color = Color.Gray)
+                        Row {
+                            TextButton(onClick = { expandBacktest = !expandBacktest }) { Text(if (expandBacktest) "收起每日明细" else "展开每日明细") }
+                            TextButton(onClick = { onOpenReturnCalendar(true) }) { Text("回测收益日历") }
+                        }
+                        if (expandBacktest) {
+                            report.result.historyRecords.forEach { day ->
+                                HorizontalDivider()
+                                SimDayRecordRow(day)
+                                Text(day.priceAsOf, fontSize = 10.sp, color = Color.Gray)
+                            }
+                            report.skipped.forEach { (date, reason) -> Text("跳过 $date：$reason", fontSize = 11.sp, color = Color(0xFF92400E)) }
                         }
                     }
                 }
@@ -506,7 +561,7 @@ fun SimTradingSheet(
 }
 
 @Composable
-private fun SimOrderItemRow(
+internal fun SimOrderItemRow(
     order: SimOrder,
     onStockClick: (code: String, name: String) -> Unit
 ) {
@@ -573,8 +628,9 @@ private fun SimDayRecordRow(record: SimDayRecord) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Column {
+        Column(Modifier.weight(1f)) {
             Text(record.date, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.DarkGray)
+            Text("${record.signalQualityLabel()} · ${record.priceQualityLabel()}", fontSize = 10.sp, color = Color.Gray)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("选股 ${record.orders.size} 只", fontSize = 11.sp, color = Color.Gray)
                 if (record.totalFee > 0) {

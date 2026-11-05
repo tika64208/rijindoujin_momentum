@@ -51,6 +51,8 @@ private fun formatFilterVal(v: Double): String = FinanceFormatter.formatFilterNu
 fun BidAnalysisScreen(
     onBack: () -> Unit,
     onStockClick: (code: String, name: String) -> Unit = { _, _ -> },
+    onOpenDistribution: () -> Unit = {},
+    onOpenReturnCalendar: (Boolean) -> Unit = {},
     viewModel: BidAnalysisViewModel = viewModel()
 ) {
     val state by viewModel.state.collectAsState()
@@ -65,6 +67,13 @@ fun BidAnalysisScreen(
     LaunchedEffect(Unit) {
         viewModel.loadFiltered()
         viewModel.loadDates()
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            viewModel.refreshOpeningStatus()
+            kotlinx.coroutines.delay(5_000)
+        }
     }
 
     // 9:29:30 自动刷新：竞价撮合完成后的黄金时点，自动拉取当日全量竞价快照（仅交易日触发一次/天）
@@ -116,6 +125,7 @@ fun BidAnalysisScreen(
             todayDate = todayStr,
             todayCandidates = todayCandidates,
             onDismiss = { showSimSheet = false },
+            onOpenReturnCalendar = { backtest -> showSimSheet = false; onOpenReturnCalendar(backtest) },
             onStockClick = onStockClick
         )
     }
@@ -165,6 +175,14 @@ fun BidAnalysisScreen(
                             onDismissRequest = { showMoreMenu = false }
                         ) {
                             DropdownMenuItem(
+                                text = { Text("竞价涨幅分布 / 历史看板") },
+                                onClick = { showMoreMenu = false; onOpenDistribution() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("收益日历") },
+                                onClick = { showMoreMenu = false; onOpenReturnCalendar(false) }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("📁 每日全量备份") },
                                 onClick = {
                                     showMoreMenu = false
@@ -192,6 +210,26 @@ fun BidAnalysisScreen(
         containerColor = SurfaceBg
     ) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+            item {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                    Text("09:30 全市场冻结档案", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Blue700)
+                    Text(state.openingArchiveStatus, fontSize = 11.sp, color = Color.DarkGray)
+                    if (!state.openingAlarmAllowed) {
+                        TextButton(onClick = {
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                                context.startActivity(android.content.Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                                    android.net.Uri.parse("package:${context.packageName}")))
+                            }
+                        }) { Text("开启 09:30 后台准点存盘", fontSize = 12.sp) }
+                    } else {
+                        Text("已设置工作日 09:30 自动采集 · 原始 JSON / 全量 CSV · 历史文件在备份中分享",
+                            fontSize = 10.sp, color = Color.Gray)
+                    }
+                    OutlinedButton(onClick = onOpenDistribution, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                        Text("竞价涨幅分布 · 查看历史日期", fontSize = 13.sp)
+                    }
+                }
+            }
             // 数据时间提示 (早盘9:30后明确指示快照已锁定)
             if (state.savedAt.isNotEmpty() && !state.loading) {
                 item {
@@ -938,10 +976,20 @@ private fun DailyBackupSheet(
                 TextButton(onClick = onDismiss) { Text("完成") }
             }
             Text(
-                "公共存储路径: Download/MomentumRotation/daily_backup/",
+                "冻结档案: Download/MomentumRotation/opening_0930/\n涨幅分布: Download/MomentumRotation/bid_distribution/\n普通备份: Download/MomentumRotation/daily_backup/\n冻结档案与分布按日期保留；普通备份为最新行情。",
                 fontSize = 11.sp, color = Color.Gray,
                 modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
             )
+
+            TextButton(onClick = {
+                isBackingUp = true
+                viewModel.restoreOpeningFiles { msg ->
+                    isBackingUp = false
+                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                }
+            }, enabled = !isBackingUp) {
+                Text("恢复历史冻结档案文件（不重新采集）", fontSize = 12.sp)
+            }
 
             Button(
                 onClick = {
@@ -1001,8 +1049,10 @@ private fun DailyBackupSheet(
                                 IconButton(onClick = { viewModel.shareBackup(info.file) }) {
                                     Text("📤", fontSize = 14.sp)
                                 }
-                                IconButton(onClick = { viewModel.deleteBackup(info) }) {
-                                    Text("🗑️", fontSize = 14.sp)
+                                if (!info.name.startsWith("竞价0930冻结_") && !info.name.startsWith("竞价涨幅分布_")) {
+                                    IconButton(onClick = { viewModel.deleteBackup(info) }) {
+                                        Text("🗑️", fontSize = 14.sp)
+                                    }
                                 }
                             }
                         }

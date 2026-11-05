@@ -15,6 +15,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+        testInstrumentationRunner = "com.example.momentum.SimAuditInstrumentation"
     }
 
     signingConfigs {
@@ -79,4 +80,5 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303")
 }

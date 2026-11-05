@@ -8,5 +8,6 @@ class MomentumApp : Application() {
         super.onCreate()
         // 全局未捕获异常捕获与错误日志管理初始化
         CrashLogManager.install(this)
+        com.example.momentum.notify.OpeningBidScheduler.schedule(this)
     }
 }

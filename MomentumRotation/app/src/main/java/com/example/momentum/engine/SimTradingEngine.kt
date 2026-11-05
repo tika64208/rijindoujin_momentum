@@ -113,7 +113,12 @@ data class SimDayRecord(
     val totalFee: Double = 0.0,
     val totalSlippage: Double = 0.0,
     val orders: List<SimOrder>,
-    val status: String // "HOLDING" (持仓中) 或 "SETTLED" (已尾盘结算)
+    val status: String, // "HOLDING" / "SETTLED"；估算还是已确认由 priceQuality 标识。
+    val signalSource: String = "LEGACY_UNVERIFIED",
+    val scoringVersion: String = "legacy-stored",
+    val priceQuality: String = "LEGACY_PRICE_UNVERIFIED",
+    val priceAsOf: String = "旧记录未保存行情时间",
+    val executionFeeConfig: SimTradingFeeConfig? = null
 ) {
     fun toJson(): JSONObject {
         val o = JSONObject()
@@ -125,6 +130,11 @@ data class SimDayRecord(
         o.put("totalFee", totalFee)
         o.put("totalSlippage", totalSlippage)
         o.put("status", status)
+        o.put("signalSource", signalSource)
+        o.put("scoringVersion", scoringVersion)
+        o.put("priceQuality", priceQuality)
+        o.put("priceAsOf", priceAsOf)
+        executionFeeConfig?.let { o.put("executionFeeConfig", it.toJson()) }
         val arr = JSONArray()
         orders.forEach { arr.put(it.toJson()) }
         o.put("orders", arr)
@@ -147,7 +157,12 @@ data class SimDayRecord(
                 totalFee = o.optDouble("totalFee", 0.0),
                 totalSlippage = o.optDouble("totalSlippage", 0.0),
                 orders = orderList,
-                status = o.optString("status", "SETTLED")
+                status = o.optString("status", "SETTLED"),
+                signalSource = o.optString("signalSource", "LEGACY_UNVERIFIED"),
+                scoringVersion = o.optString("scoringVersion", "legacy-stored"),
+                priceQuality = o.optString("priceQuality", "LEGACY_PRICE_UNVERIFIED"),
+                priceAsOf = o.optString("priceAsOf", "旧记录未保存行情时间"),
+                executionFeeConfig = o.optJSONObject("executionFeeConfig")?.let { SimTradingFeeConfig.fromJson(it) }
             )
         }
     }
@@ -188,6 +203,11 @@ object SimTradingEngine {
         candidates: List<BidDataEntity>,
         feeConfig: SimTradingFeeConfig = SimTradingFeeConfig()
     ): SimDayRecord {
+        require(currentCapital.isFinite() && currentCapital >= 0) { "模拟本金无效" }
+        require(candidates.map { it.code }.toSet().size == candidates.size) { "候选股票重复" }
+        require(candidates.all { it.openPrice.isFinite() && it.openPrice > 0 && it.latestPrice.isFinite() && it.latestPrice > 0 }) {
+            "缺少有效开盘价或结算价格，不能使用最新价替代开盘价"
+        }
         if (candidates.isEmpty()) {
             return SimDayRecord(
                 date = date,
@@ -207,15 +227,16 @@ object SimTradingEngine {
         val orders = mutableListOf<SimOrder>()
 
         for (item in candidates) {
-            val baseBuy = if (item.openPrice > 0) item.openPrice else item.latestPrice
-            if (baseBuy <= 0) continue
+            val baseBuy = item.openPrice
 
             // 计入滑点后的买入成交价 (抢筹高开)
             val actualBuy = if (feeConfig.enableSlippage) baseBuy * (1.0 + feeConfig.slippageRate) else baseBuy
 
             // 整百股向下取整
-            val rawShares = (perCapital / actualBuy).toInt()
+            val feeMultiplier = if (feeConfig.enableFee) 1.0 + feeConfig.feeRateBuy else 1.0
+            val rawShares = (perCapital / (actualBuy * feeMultiplier)).toInt()
             val shares = (rawShares / 100) * 100
+            if (shares <= 0) continue
             val actualCost = shares * actualBuy
 
             // 买入佣金
@@ -269,7 +290,8 @@ object SimTradingEngine {
             totalFee = totalFee,
             totalSlippage = totalSlippage,
             orders = orders,
-            status = "HOLDING"
+            status = "HOLDING",
+            executionFeeConfig = feeConfig
         )
     }
 
@@ -281,16 +303,18 @@ object SimTradingEngine {
         closePriceMap: Map<String, Double> = emptyMap(),
         feeConfig: SimTradingFeeConfig = SimTradingFeeConfig()
     ): SimDayRecord {
+        val executionFees = record.executionFeeConfig ?: feeConfig
         val updatedOrders = record.orders.map { order ->
-            val baseSell = closePriceMap[order.code] ?: if (order.baseSellPrice > 0) order.baseSellPrice else order.buyPrice
-            val actualSell = if (feeConfig.enableSlippage) baseSell * (1.0 - feeConfig.slippageRate) else baseSell
+            val baseSell = closePriceMap[order.code] ?: order.baseSellPrice
+            require(baseSell.isFinite() && baseSell > 0) { "缺少 ${order.code} 有效卖出价格" }
+            val actualSell = if (executionFees.enableSlippage) baseSell * (1.0 - executionFees.slippageRate) else baseSell
             val revenue = order.shares * actualSell
 
-            val sellFee = if (feeConfig.enableFee) revenue * feeConfig.feeRateSell else 0.0
-            val sellSlippage = if (feeConfig.enableSlippage) order.shares * (baseSell - actualSell) else 0.0
+            val sellFee = if (executionFees.enableFee) revenue * executionFees.feeRateSell else 0.0
+            val sellSlippage = if (executionFees.enableSlippage) order.shares * (baseSell - actualSell) else 0.0
 
             val totalOrderFee = order.buyFee + sellFee
-            val totalOrderSlippage = (order.slippageCost / 2.0) + sellSlippage // 买入滑点 + 卖出滑点
+            val totalOrderSlippage = order.shares * (order.buyPrice - order.baseBuyPrice) + sellSlippage // 买入滑点 + 卖出滑点
             val netProfit = (revenue - sellFee) - (order.actualCost + order.buyFee)
             val returnPct = if ((order.actualCost + order.buyFee) > 0) (netProfit / (order.actualCost + order.buyFee)) * 100.0 else 0.0
 
@@ -321,6 +345,12 @@ object SimTradingEngine {
         )
     }
 
+    fun simulateDay(capital: Double, date: String, rows: List<BidDataEntity>, config: BidStrategy.BidConfig,
+                    fees: SimTradingFeeConfig): SimDayRecord {
+        val candidates = BidCandidateSelector.select(rows, config)
+        return executeSettle(executeBuy(capital, date, candidates, fees), candidates.associate { it.code to it.latestPrice }, fees)
+    }
+
     /**
      * 全历史多交易日自动回测 (考虑手续费与滑点)
      */
@@ -339,32 +369,9 @@ object SimTradingEngine {
         val sortedDates = dateMap.keys.sorted()
 
         for (d in sortedDates) {
+            if (java.time.LocalDate.parse(d).dayOfWeek.value > 5) continue
             val allItems = dateMap[d] ?: continue
-            val candidates = allItems.filter { e ->
-                val p = e.probability
-                val c = e.confidence
-                val s = e.score
-                val chg = e.bidChange
-                val mvYi = e.circMv / 100_000_000.0
-                val pr = if (e.openPrice > 0) e.openPrice else e.latestPrice
-
-                if (config.bidMin > 0 && chg < config.bidMin) return@filter false
-                if (config.bidMax > 0 && chg > config.bidMax) return@filter false
-                if (config.probMin > 0 && p < config.probMin) return@filter false
-                if (config.probMax > 0 && p > config.probMax) return@filter false
-                if (config.confMin > 0 && c < config.confMin) return@filter false
-                if (config.confMax > 0 && c > config.confMax) return@filter false
-                if (config.scoreMin > 0 && s < config.scoreMin) return@filter false
-                if (config.scoreMax > 0 && s > config.scoreMax) return@filter false
-                if (config.mvMin > 0 && mvYi < config.mvMin) return@filter false
-                if (config.mvMax > 0 && mvYi > config.mvMax) return@filter false
-                if (config.priceMin > 0 && pr < config.priceMin) return@filter false
-                if (config.priceMax > 0 && pr > config.priceMax) return@filter false
-                if (config.filterStSuspend && (e.warnFlag and 1 != 0 || e.name.contains("ST"))) return@filter false
-                if (config.filterLimitUp && (e.warnFlag and 2 != 0 || chg >= 9.5)) return@filter false
-
-                true
-            }
+            val candidates = BidCandidateSelector.select(allItems, config)
 
             if (candidates.isEmpty()) {
                 val dayRec = SimDayRecord(
@@ -382,9 +389,7 @@ object SimTradingEngine {
                 continue
             }
 
-            val dayBuy = executeBuy(capital, d, candidates, feeConfig)
-            val closeMap = candidates.associate { it.code to it.latestPrice }
-            val daySettled = executeSettle(dayBuy, closeMap, feeConfig)
+            val daySettled = simulateDay(capital, d, candidates, config, feeConfig)
 
             capital = daySettled.endCapital
             totalFeePaid += daySettled.totalFee
