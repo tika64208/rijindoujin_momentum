@@ -26,6 +26,17 @@ import java.time.format.DateTimeFormatter
 enum class BidRowDensity { DETAIL, COMPACT, ULTRA }
 
 /**
+ * 一次刷新的结果。
+ * - Written：确实写入/更新了当日数据
+ * - Skipped：接口返回的是别的交易日的行情（零点后、休市日、数据源未更新），为避免把上一交易日的快照
+ *   记到今天的日期下，本次不写库，只把原因交给界面提示
+ */
+sealed class BidRefreshResult {
+    data class Written(val count: Int) : BidRefreshResult()
+    data class Skipped(val reason: String) : BidRefreshResult()
+}
+
+/**
  * 竞价分析数据仓库。
  *
  * 职责：
@@ -123,7 +134,7 @@ class BidRepository(
      *   * 若当日早盘尚未生成快照而在盘中首次打开，以接口数据固化并生成首份快照，后续刷新立即锁定。
      * @return 实际存入的股票条数
      */
-    suspend fun refresh(config: BidStrategy.BidConfig, force: Boolean = true): Result<Int> =
+    suspend fun refresh(config: BidStrategy.BidConfig, force: Boolean = true): Result<BidRefreshResult> =
         withContext(Dispatchers.IO) {
             try {
                 val market = EastmoneyBidDataSource.fetchMarket()
@@ -135,6 +146,12 @@ class BidRepository(
                 val rawItems = market.items
                 if (rawItems.isEmpty()) {
                     return@withContext Result.failure(RuntimeException("未拉取到竞价数据"))
+                }
+
+                // 日期以接口报价时间(f124)为准，而不是系统时钟：零点后与休市日，接口仍返回上一交易日的快照，
+                // 若按系统日期入库就会把昨天的行情记成今天的数据。
+                BidQuoteClock.rejectReason(market.quoteTimes.values, currentTime)?.let { reason ->
+                    return@withContext Result.success(BidRefreshResult.Skipped(reason))
                 }
 
                 // 读取已有快照中的竞价数值与早盘模型评分
@@ -212,7 +229,7 @@ class BidRepository(
                     } catch (_: Exception) {}
                 }
 
-                Result.success(entities.size)
+                Result.success(BidRefreshResult.Written(entities.size))
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {

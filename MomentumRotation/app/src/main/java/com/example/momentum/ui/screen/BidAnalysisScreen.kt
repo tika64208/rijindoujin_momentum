@@ -287,6 +287,19 @@ fun BidAnalysisScreen(
                     )
                 }
             }
+            // 刷新被跳过时的提示（接口给的是别的交易日的行情，未写入）
+            if (state.dataNotice.isNotEmpty()) {
+                item {
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .background(Color(0xFFFEF3C7), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Text("⚠ ${state.dataNotice}", fontSize = 11.sp, color = Color(0xFF92400E))
+                    }
+                }
+            }
             // 100万模拟盘资产小看板 (点击直接进入模拟买入/结算)
             item {
                 val simManager = remember { SimTradingManager.get(context) }

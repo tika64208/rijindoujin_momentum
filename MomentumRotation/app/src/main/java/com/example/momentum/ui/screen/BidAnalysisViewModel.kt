@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.momentum.data.BidRepository
+import com.example.momentum.data.BidRefreshResult
 import com.example.momentum.data.BidRowDensity
 import com.example.momentum.data.db.BidDataEntity
 import com.example.momentum.engine.BidStrategy
@@ -39,7 +40,9 @@ data class BidAnalysisState(
     val lockedCodes: Set<String> = emptySet(),
     val openingArchiveStatus: String = "正在读取 09:30 档案状态",
     val openingAlarmAllowed: Boolean = false,
-    val rowDensity: BidRowDensity = BidRowDensity.DETAIL
+    val rowDensity: BidRowDensity = BidRowDensity.DETAIL,
+    /** 最近一次刷新被跳过的原因（接口给的是别的交易日的行情），非空时在页面上以提示条展示。 */
+    val dataNotice: String = ""
 ) {
     val displayResults: List<BidStrategy.BidResult>
         get() {
@@ -177,11 +180,20 @@ class BidAnalysisViewModel(application: Application) : AndroidViewModel(applicat
         job = viewModelScope.launch {
             try {
                 val result = repository.refresh(_state.value.config)
-                result.onSuccess {
-                    _state.update { it.copy(loading = false) }
-                    loadFiltered(autoRefreshIfStale = false)
-                }.onFailure { err ->
-                    _state.update { it.copy(loading = false, error = "获取竞价数据失败: ${err.message}") }
+                val outcome = result.getOrNull()
+                when (outcome) {
+                    is BidRefreshResult.Written -> {
+                        _state.update { it.copy(loading = false, dataNotice = "") }
+                        loadFiltered(autoRefreshIfStale = false)
+                    }
+                    is BidRefreshResult.Skipped -> {
+                        // 未写入：只提示，不动已有数据，也不当成"获取失败"
+                        _state.update { it.copy(loading = false, dataNotice = outcome.reason) }
+                        loadFiltered(autoRefreshIfStale = false)
+                    }
+                    null -> _state.update {
+                        it.copy(loading = false, error = "获取竞价数据失败: ${result.exceptionOrNull()?.message}")
+                    }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // 任务被新请求取消：重置 loading，避免按钮永久禁用
